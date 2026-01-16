@@ -32,10 +32,10 @@ export async function openOrder(marketIndex: number = 0, isAsk: boolean = false,
     return result;
 }
 
-openOrder(2, false, 100 , 141700, 0.001, 138000, 143000).then((result) => {
-    console.log('Order Result:', result);
-    console.log(result.stopLoss?.tx.Orders);
+// openOrder(2, false, 100 , 141700, 0.001, 138000, 143000).then((result) => {
+//     console.log('Order Result:', result);
+//     console.log(result.stopLoss?.tx.Orders);
     
-}).catch((error) => {
-    console.error('Error placing order:', error);
-});
+// }).catch((error) => {
+//     console.error('Error placing order:', error);
+// });

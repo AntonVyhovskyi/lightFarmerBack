@@ -9,8 +9,8 @@ export async function updateOrder(marketIndex: number, orderIndex: number, baseA
 
 
 // Example usage:
-updateOrder(2, 844425510731696, 977, 147000, 0).then((result) => {
-    console.log('Update Order Result:', result);
-}).catch((error) => {
-    console.error('Error updating order:', error);
-});
+// updateOrder(2, 844425510731696, 977, 147000, 0).then((result) => {
+//     console.log('Update Order Result:', result);
+// }).catch((error) => {
+//     console.error('Error updating order:', error);
+// });
