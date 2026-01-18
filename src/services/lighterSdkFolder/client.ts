@@ -1,21 +1,34 @@
-import { SignerClient, OrderType } from 'lighter-ts-sdk';
-import dotenv from 'dotenv';
+import { SignerClient } from 'lighter-ts-sdk';
 
-dotenv.config();
+let signerPromise: Promise<SignerClient> | null = null;
 
-let signerClient: SignerClient | null = null;
+export function resetSigner() {
+  signerPromise = null;
+}
 
-export async function getSigner(): Promise<SignerClient> {
-    if (signerClient) return signerClient;
-    signerClient = new SignerClient({
-        url: process.env.BASE_URL!,
-        privateKey: process.env.API_PRIVATE_KEY!,
-        accountIndex: parseInt(process.env.ACCOUNT_INDEX!),
-        apiKeyIndex: parseInt(process.env.API_KEY_INDEX!)
-    });
+export function getSigner(): Promise<SignerClient> {
+  if (signerPromise) return signerPromise;
 
-    await signerClient.initialize();
-    await signerClient.ensureWasmClient();
+  signerPromise = (async () => {
+    const url = process.env.BASE_URL;
+    const privateKey = process.env.API_PRIVATE_KEY;
+    const accountIndex = Number(process.env.ACCOUNT_INDEX);
+    const apiKeyIndex = Number(process.env.API_KEY_INDEX);
 
-    return signerClient;
+    if (!url || !privateKey || !Number.isFinite(accountIndex) || !Number.isFinite(apiKeyIndex)) {
+      throw new Error('Missing/invalid env for signer');
+    }
+
+    const sc = new SignerClient({ url, privateKey, accountIndex, apiKeyIndex });
+
+    await sc.initialize();
+    await sc.ensureWasmClient();
+
+    return sc;
+  })().catch((err) => {
+    signerPromise = null; // щоб наступна спроба могла повторити ініціалізацію
+    throw err;
+  });
+
+  return signerPromise;
 }

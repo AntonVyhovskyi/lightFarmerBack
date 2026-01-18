@@ -4,7 +4,7 @@ import { getSigner } from '../lighterSdkFolder/client';
 
 
 
-export async function subscribeToAccountAllOrdersWS(accountIndex: number, onMessage: (data: any) => void, onError: (error: any) => void) {
+export async function subscribeToAccountOrdersWS(accountIndex: number, marketIndex: number, onMessage: (data: any) => void, onError: (error: any) => void) {
 
     const signer = await getSigner();
     const authToken = await signer.createAuthToken();
@@ -14,10 +14,10 @@ export async function subscribeToAccountAllOrdersWS(accountIndex: number, onMess
     const ws = new WebSocket(`wss://mainnet.zklighter.elliot.ai/stream`);
     
     ws.on("open", () => {
-        console.log('WebSocket connection opened for account all orders stream.', accountIndex);
+        console.log('WebSocket connection opened for account orders stream.', accountIndex);
         ws.send(JSON.stringify({
             type: "subscribe",
-            channel: `account_all_orders/${accountIndex}`,
+            channel: `account_orders/${marketIndex}/${accountIndex}`,
             auth: authToken
         }));
 
@@ -42,8 +42,9 @@ export async function subscribeToAccountAllOrdersWS(accountIndex: number, onMess
 
 // Example usage:
 // (async () => {
-//     const ws = await subscribeToAccountAllOrdersWS(
+//     const ws = await subscribeToAccountOrdersWS(
 //         277234,
+//         2,
 //         (data) => {console.log("Received:", data)
 //             console.log("Orders:", data.orders);
 //         },

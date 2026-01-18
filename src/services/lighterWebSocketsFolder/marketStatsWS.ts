@@ -1,12 +1,12 @@
 import WebSocket from 'ws';
 
-export function subscribeToMarketStatsWS(marketIndex: number, onMessage: (data: any) => void, onError: (error: any) => void) {
+export function subscribeToMarketStatsWS(accountIndex: number, onMessage: (data: any) => void, onError: (error: any) => void) {
     const ws = new WebSocket(`wss://mainnet.zklighter.elliot.ai/stream`);
 
     ws.on("open", () => {
         ws.send(JSON.stringify({
             type: "subscribe",
-            channel: `market_stats/${marketIndex}`,
+            channel: `market_stats/${accountIndex}`,
         }));
     });
 
@@ -26,12 +26,12 @@ export function subscribeToMarketStatsWS(marketIndex: number, onMessage: (data: 
 
 
 // Example usage:
-// (async () => {
-//     const ws = await subscribeToMarketStatsWS(
-//         2,
-//         (data) => {console.log("Received:", data)
+(async () => {
+    const ws = await subscribeToMarketStatsWS(
+        2,
+        (data) => {console.log("Received:", data)
            
-//         },
-//         (err) => console.error("WS error:", err)
-//     );
-// })();
+        },
+        (err) => console.error("WS error:", err)
+    );
+})();

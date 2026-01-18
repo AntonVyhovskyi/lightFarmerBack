@@ -3,7 +3,7 @@ import { OrderType } from 'lighter-ts-sdk';
 
 
 
-export async function openOrder(marketIndex: number = 0, isAsk: boolean = false, baseAmount: number, idealPrice: number, maxSlippage: number, stopLossTrigger: number, takeProfitTrigger: number) {
+export async function openOrder(marketIndex: number = 0, isAsk: boolean = false, baseAmount: number, idealPrice: number, stopLossTrigger: number, takeProfitTrigger?: number, maxSlippage: number = 0.001) {
     const signer = await getSigner();
     if (!baseAmount) {
         throw new Error("Base amount is required to open an order.");
@@ -24,10 +24,10 @@ export async function openOrder(marketIndex: number = 0, isAsk: boolean = false,
             triggerPrice: stopLossTrigger,       // Stop loss at $3800
             isLimit: false              // Market SL
         },
-        takeProfit: {
-            triggerPrice: takeProfitTrigger,       // Take profit at $4200
-            isLimit: false              // Market TP
-        }
+        // takeProfit: {
+        //     triggerPrice: takeProfitTrigger,       // Take profit at $4200
+        //     isLimit: false              // Market TP
+        // }
     });
     return result;
 }

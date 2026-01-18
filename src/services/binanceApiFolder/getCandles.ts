@@ -1,4 +1,4 @@
-export const getCandlesFromBinance = async (symbol: string  = "ETH", interval: string = "1m", limit: number = 100) => {
+export const getCandlesFromBinance = async (symbol: string = "ETH", interval: string = "1m", limit: number = 100): Promise<any[][]> => {
     try {
         let fixedSymbolString
         if (symbol === 'BTC') {
@@ -9,11 +9,11 @@ export const getCandlesFromBinance = async (symbol: string  = "ETH", interval: s
             fixedSymbolString = 'SOLUSDC'
         }
         const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${fixedSymbolString}&interval=${interval}&limit=${limit}`);
-        const data = await response.json();
+        const data = await response.json() as any[][];
         return data;
     } catch (error) {
         console.log(error);
-
+        throw error;
     }
 
 }

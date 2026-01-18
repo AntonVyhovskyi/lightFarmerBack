@@ -41,7 +41,7 @@ export function subscribeBinanceCandlesWS(symbol: string, interval: string, onCl
     ws.on('error', (err) => console.error("WS Error:", err));
     ws.on('close', () => console.log("WS закрито"));
 
-    return () => ws.close();
+    return ws;
 }
 
 

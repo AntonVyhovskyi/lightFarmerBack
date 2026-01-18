@@ -12,6 +12,7 @@
   "dependencies": {
     "dotenv": "^17.2.3",
     "lighter-ts-sdk": "^1.0.8",
+    "technicalindicators": "^3.1.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {
