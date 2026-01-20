@@ -25,6 +25,7 @@ export class BotManager {
         let position: number = 0;
         let balance: { total: number; avaliable: number } = { total: 0, avaliable: 0 };
         let leverage: number = 0;
+        let trailingActive: boolean = false;
 
         // change leverage on start --------------------------------------------------------------------------
         try {
@@ -38,13 +39,21 @@ export class BotManager {
         // ---------------------------------------------------------------------------------------------------
 
 
-        const candlesWS = subscribeBinanceCandlesWS(options.symbol.name, options.timeframe, (candle) => {
+        const candlesWS = subscribeBinanceCandlesWS(options.symbol.name, options.timeframe, async (candle) => {
 
             candles.push(candle);
             if (candles.length > 500) {
                 candles.shift();
             }
-            botEngine({...options, candles, position, orders, balance, leverage}, );
+            const actions =  await botEngine({...options, candles, position, orders, balance, leverage}, getActionsFromConservativeEmaStrategy);
+            actions.forEach(async (action) => {
+                if (action.type === 'updateLeverage' && action.options.leverage !== leverage) {
+                    leverage = action.options.leverage;
+                }
+                if (action.type === 'trailingActive') {
+                    trailingActive = action.options.isActive;
+                }
+            });
         })
 
 

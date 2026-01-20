@@ -8,4 +8,6 @@ import { OptionsForEngine } from "./types";
 export const botEngine = (options: OptionsForEngine, getActions: (params: ParamsForSomeStrategy) => ActionsTypes[]) => {
     const actions = getActions(options);
 
+    return actions;
+
 }

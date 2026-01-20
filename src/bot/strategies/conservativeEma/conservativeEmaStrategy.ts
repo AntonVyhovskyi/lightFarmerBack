@@ -96,6 +96,64 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
 
     }
 
+
+    const openSellOrder = async (slPrice: number) => {
+        const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, riskPct, price, slPrice, leverage, "short");
+
+        if (nMargin > balance.total) {
+            console.log(`⛔ Not enough balance to open short position. Required margin: ${nMargin}, Available balance: ${balance.total}`);
+            const newLeverage = Math.ceil(notional / balance.total);
+            if (newLeverage > 20) {
+                console.log('За велика позиція для данного ризик менеджменту');
+                return [];
+            }
+            actions.push({ type: 'updateLeverage', options: { marketIndex: symbol.index, leverage: newLeverage } });
+
+            const newMargin = notional / newLeverage;
+            if (newMargin > balance.total) {
+                console.log("❌ Even with new leverage margin still too high");
+                return [];
+            }
+        }
+
+        if (position > 0) {
+            actions.push({ type: 'closePosition', options: { marketIndex: symbol.index, quantity: Math.abs(position), size: true, price: price } });
+        }
+        actions.push({ type: 'openPosition', options: { marketIndex: symbol.index, quantity: qty, size: false, price: price, slPrice: slPrice } });
+    }
+
+
+    
+    // _____________________________________________________________________________________________
+    // _____________________________________________________________________________________________
+    // _____________________________________________________________________________________________
+
+
+
+    // ______________________________OPEN POSITION LOGIC_________________________________________
+
+
+
+
+    const oprenPositionLogic = async () => {
+        if (position === 0) {
+            actions.push({ type: 'trailingActive', options: { isActive: false } });
+            actions.push({ type: 'beActive', options: { isActive: false } })
+            if (emaShort > emaLong && prevEmaShort < prevEmaLong)  {
+                const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
+                const minLastFive = Math.min(...lastFiveClothes);
+                const priceChangePct = ((closes[closes.length - 1] - minLastFive) / minLastFive) * 100;
+                if (priceChangePct >= atrRange) {
+                    const slPrice = closes[closes.length - 1] - atr * (atrPctforSL);
+                    await openBuyOrder(slPrice);
+                }
+            }
+        }
+    }
+
     return actions;
+
+
+    
 
 }
