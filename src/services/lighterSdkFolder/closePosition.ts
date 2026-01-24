@@ -1,6 +1,6 @@
 import { getSigner } from "./client";
 
-export async function closePosition(marketIndex: number, baseAmount: number, isAsk: boolean, avgExecutionPrice: number) {
+export async function closePosition(marketIndex: number, baseAmount: number, isAsk: boolean, avgExecutionPrice: number ) {
     const signer = await getSigner();
     const [tx, hash, error] = await signer.createMarketOrder({
         marketIndex,

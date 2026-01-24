@@ -12,7 +12,7 @@ export async function subscribeToAccountOrdersWS(accountIndex: number, marketInd
 
 
     const ws = new WebSocket(`wss://mainnet.zklighter.elliot.ai/stream`);
-    
+
     ws.on("open", () => {
         console.log('WebSocket connection opened for account orders stream.', accountIndex);
         ws.send(JSON.stringify({
@@ -31,8 +31,12 @@ export async function subscribeToAccountOrdersWS(accountIndex: number, marketInd
     ws.on('error', (error) => {
         onError(error);
     });
-    ws.on('close', () => {
-        console.log('WebSocket connection closed for account all orders stream.', accountIndex);
+    ws.on('close', (code, reason) => {
+        console.log('WS closed', {
+            channel: `account_orders/${marketIndex}/${accountIndex}`,
+            code,
+            reason: reason?.toString(),
+        });
     });
     return ws;
 }

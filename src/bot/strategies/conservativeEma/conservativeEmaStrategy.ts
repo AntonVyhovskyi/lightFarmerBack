@@ -1,6 +1,8 @@
+import { normalizePrice } from './../tools/normalizePrice';
 import { ATR, EMA } from "technicalindicators";
 import { ActionsTypes } from "../../execution/types";
 import { ParamsTypeForConservativeStrategy } from "./types";
+import { normalizeQty } from '../tools/normalizeQty';
 
 
 function calculateQtyAndNMargin(balance: number, riskPct: number, entryPrice: number, slPrice: number, leverage: number, side: "long" | "short") {
@@ -36,7 +38,11 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
         position,
         symbol,
         orders,
-        leverage
+        leverage,
+        optLeverage,
+        beActive,
+        trailingActive,
+        entryPrice
     } = options;
 
     const closes = candles.map(c => parseFloat(c[4]));
@@ -56,7 +62,7 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
     const atr = atrValues[atrValues.length - 1];
 
     const price = closes[closes.length - 1];
-    const prePrice = closes[closes.length - 2];
+
 
 
     // ________________________________BUY SELL FUNCTIONS_________________________________________
@@ -64,7 +70,7 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
     // ____________________________________________________________________________________________
 
 
-    const openBuyOrder = async (slPrice: number) => {
+    const openBuyOrder = (slPrice: number) => {
 
 
         const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, riskPct, price, slPrice, leverage, "long");
@@ -75,7 +81,7 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
 
             if (newLeverage > 20) {
                 console.log('За велика позиція для данного ризик менеджменту');
-                return [];
+                return [] as ActionsTypes[];
             }
 
             actions.push({ type: 'updateLeverage', options: { marketIndex: symbol.index, leverage: newLeverage } });
@@ -83,22 +89,24 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
             const newMargin = notional / newLeverage;
             if (newMargin > balance.total) {
                 console.log("❌ Even with new leverage margin still too high");
-                return [];
+                return [] as ActionsTypes[];
             }
         }
-
+        const fixedSlQty = normalizeQty(qty, symbol.index);
         if (position < 0) {
             actions.push({ type: 'closePosition', options: { marketIndex: symbol.index, quantity: Math.abs(position), size: false, price: price } });
         }
 
 
-        actions.push({ type: 'openPosition', options: { marketIndex: symbol.index, quantity: qty, size: true, price: price, slPrice: slPrice } });
+        actions.push({ type: 'openPosition', options: { marketIndex: symbol.index, quantity: fixedSlQty, size: true, price: price, slPrice: slPrice } });
 
     }
 
 
     const openSellOrder = async (slPrice: number) => {
         const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, riskPct, price, slPrice, leverage, "short");
+        const fixedSlPrice = normalizePrice(slPrice, symbol.index);
+        const fixedPrice = normalizePrice(price, symbol.index);
 
         if (nMargin > balance.total) {
             console.log(`⛔ Not enough balance to open short position. Required margin: ${nMargin}, Available balance: ${balance.total}`);
@@ -115,15 +123,16 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
                 return [];
             }
         }
+        const fixedSlQty = normalizeQty(qty, symbol.index);
 
         if (position > 0) {
-            actions.push({ type: 'closePosition', options: { marketIndex: symbol.index, quantity: Math.abs(position), size: true, price: price } });
+            actions.push({ type: 'closePosition', options: { marketIndex: symbol.index, quantity: Math.abs(position), size: true, price: fixedPrice } });
         }
-        actions.push({ type: 'openPosition', options: { marketIndex: symbol.index, quantity: qty, size: false, price: price, slPrice: slPrice } });
+        actions.push({ type: 'openPosition', options: { marketIndex: symbol.index, quantity: fixedSlQty, size: false, price: price, slPrice: fixedSlPrice } });
     }
 
 
-    
+
     // _____________________________________________________________________________________________
     // _____________________________________________________________________________________________
     // _____________________________________________________________________________________________
@@ -135,25 +144,168 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
 
 
 
-    const oprenPositionLogic = async () => {
+    const openPositionLogic = () => {
         if (position === 0) {
+            if (leverage !== optLeverage) {
+                actions.push({ type: 'updateLeverage', options: { marketIndex: symbol.index, leverage: optLeverage } });
+            }
             actions.push({ type: 'trailingActive', options: { isActive: false } });
             actions.push({ type: 'beActive', options: { isActive: false } })
-            if (emaShort > emaLong && prevEmaShort < prevEmaLong)  {
+            if (emaShort > emaLong && prevEmaShort < prevEmaLong) {
                 const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
                 const minLastFive = Math.min(...lastFiveClothes);
                 const priceChangePct = ((closes[closes.length - 1] - minLastFive) / minLastFive) * 100;
                 if (priceChangePct >= atrRange) {
                     const slPrice = closes[closes.length - 1] - atr * (atrPctforSL);
-                    await openBuyOrder(slPrice);
+                    openBuyOrder(slPrice);
+                } else {
+                    console.log("Слабо виражений сигнал на продаж (АТР)");
                 }
+            } else if (emaShort < emaLong && prevEmaShort > prevEmaLong) {
+                const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
+                const maxLastFive = Math.max(...lastFiveClothes);
+                const priceChangePct = ((maxLastFive - closes[closes.length - 1]) / maxLastFive) * 100;
+                if (priceChangePct >= atrRange) {
+                    const slPrice = closes[closes.length - 1] + atr * (atrPctforSL);
+                    openSellOrder(slPrice);
+                } else {
+                    console.log("Слабо виражений сигнал на продаж (АТР)");
+                }
+            } else {
+                console.log("Нема пересічення EMA ліній, позиція не відкрита");
             }
+        } else {
+            console.log("Позиція вже відкрита", position);
         }
     }
 
+    openPositionLogic();
+    // _____________________________________________________________________________________________
+    // _____________________________________________________________________________________________
+    // _____________________________________________________________________________________________
+
+    // -------------------- IF LONG ------------------------
+
+
+    let slOrder = orders.find(order => order.type === 'stop-loss');
+    let slPrice = slOrder ? parseFloat(slOrder.trigger_price) : 0;
+    let slIndex = slOrder ? slOrder.order_index : 0;
+
+
+    if (position > 0) {
+        if (!beActive && !trailingActive && price >= Number(entryPrice) * (1 + bePrc / 100) && price < Number(entryPrice) * (1 + trailStartFromParams / 100)) {
+
+            actions.push({ type: 'beActive', options: { isActive: true } });
+
+            actions.push({
+                type: 'updateOrder',
+                options: {
+                    marketIndex: symbol.index,
+                    orderIndex: slIndex,
+                    baseAmount: normalizeQty(position, symbol.index),
+                    price: normalizePrice((Number(entryPrice) - Number(entryPrice) * 0.1), symbol.index),
+                    triggerPrice: normalizePrice(entryPrice, symbol.index)
+                }
+            });
+        } else if (!trailingActive && price >= Number(entryPrice) * (1 + trailStartFromParams / 100)) {
+            const newPriceForSL = price - (price * (trailGapFromParams / 100));
+            actions.push({ type: 'trailingActive', options: { isActive: true } });
+            actions.push({
+                type: 'updateOrder',
+                options: {
+                    marketIndex: symbol.index,
+                    orderIndex: slIndex,
+                    baseAmount: normalizeQty(position, symbol.index),
+                    price: normalizePrice(newPriceForSL - newPriceForSL * 0.1, symbol.index),
+                    triggerPrice: normalizePrice(newPriceForSL, symbol.index)
+                }
+            });
+        } else if (trailingActive) {
+            const newPriceForSL = price - (price * (trailGapFromParams / 100));
+            if (newPriceForSL > slPrice) {
+                actions.push({
+                    type: 'updateOrder',
+                    options: {
+                        marketIndex: symbol.index,
+                        orderIndex: slIndex,
+                        baseAmount: normalizeQty(position, symbol.index),
+                        price: normalizePrice(newPriceForSL - newPriceForSL * 0.1, symbol.index),
+                        triggerPrice: normalizePrice(newPriceForSL, symbol.index)
+                    }
+                });
+            } else {
+                console.log(`Позиція Відкрита: ${position}`);
+                console.log(`Дія не виконана`);
+                console.log(`Новий стоп лосс ${newPriceForSL} менший за поточний ${slPrice}`);
+            }
+
+        } else {
+            console.log(`Позиція Відкрита: ${position}`);
+            console.log(`Дія не виконана`);
+            console.log(`Безубиток ${beActive ? 'активний' : ' не активний'}`);
+            console.log(`трейлінг ${trailingActive ? 'активний' : ' не активний'}`);
+
+
+
+        }
+    }
+
+
+    // -------------------- IF SHORT ------------------------
+    else if (position < 0) {
+        if (!beActive && !trailingActive && price <= Number(entryPrice) * (1 - bePrc / 100) && price > Number(entryPrice) * (1 - trailStartFromParams / 100)) {
+            actions.push({ type: 'beActive', options: { isActive: true } });
+
+            actions.push({
+                type: 'updateOrder',
+                options: {
+                    marketIndex: symbol.index,
+                    orderIndex: slIndex,
+                    baseAmount: normalizeQty(Math.abs(position), symbol.index),
+                    price: normalizePrice((Number(entryPrice) + Number(entryPrice) * 0.1), symbol.index),
+                    triggerPrice: normalizePrice(entryPrice, symbol.index)
+                }
+            });
+        } else if (!trailingActive && price <= Number(entryPrice) * (1 - trailStartFromParams / 100)) {
+            const newPriceForSL = price + (price * (trailGapFromParams / 100));
+            actions.push({ type: 'trailingActive', options: { isActive: true } });
+            actions.push({
+                type: 'updateOrder',
+                options: {
+                    marketIndex: symbol.index,
+                    orderIndex: slIndex,
+                    baseAmount: normalizeQty(Math.abs(position), symbol.index),
+                    price: normalizePrice(newPriceForSL + newPriceForSL * 0.1, symbol.index),
+                    triggerPrice: normalizePrice(newPriceForSL, symbol.index)
+                }
+            });
+        } else if (trailingActive) {
+            const newPriceForSL = price + (price * (trailGapFromParams / 100));
+            if (newPriceForSL < slPrice) {
+                actions.push({
+                    type: 'updateOrder',
+                    options: {
+                        marketIndex: symbol.index,
+                        orderIndex: slIndex,
+                        baseAmount: normalizeQty(Math.abs(position), symbol.index),
+                        price: normalizePrice(newPriceForSL + newPriceForSL * 0.1, symbol.index),
+                        triggerPrice: normalizePrice(newPriceForSL, symbol.index)
+                    }
+                });
+            } else {
+                console.log(`Позиція Відкрита: ${position}`);
+                console.log(`Дія не виконана`);
+                console.log(`Новий стоп лосс ${newPriceForSL} більший за поточний ${slPrice}`);
+            }
+
+        } else {
+            console.log(`Позиція Відкрита: ${position}`);
+            console.log(`Дія не виконана`);
+            console.log(`Безубиток ${beActive ? 'активний' : ' не активний'}`);
+            console.log(`трейлінг ${trailingActive ? 'активний' : ' не активний'}`);
+        }
+
+
+    }
     return actions;
-
-
-    
-
 }

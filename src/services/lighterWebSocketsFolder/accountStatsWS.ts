@@ -20,9 +20,15 @@ export function subscribeToAccountStatsWS(accountIndex: number, onMessage: (data
     ws.on('error', (error) => {
         onError(error);
     });
-    ws.on('close', () => {
-        console.log('WebSocket connection closed for user stats stream.', accountIndex);
+
+    ws.on('close', (code, reason) => {
+        console.log('WS closed', {
+            channel: `user_stats/${accountIndex}`,
+            code,
+            reason: reason?.toString(),
+        });
     });
+    
     return ws;
 }
 

@@ -18,8 +18,12 @@ export function subscribeToAccountAllWS(accountIndex: number, onMessage: (data: 
     ws.on('error', (error) => {
         onError(error);
     });
-    ws.on('close', () => {
-        console.log('WebSocket connection closed for account all stream.', accountIndex);
+    ws.on('close', (code, reason) => {
+        console.log('WS closed', {
+            channel: `account_all/${accountIndex}`,
+            code,
+            reason: reason?.toString(),
+        });
     });
     return ws;
 }

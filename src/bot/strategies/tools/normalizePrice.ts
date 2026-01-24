@@ -1,6 +1,6 @@
-const normalizePrice = (price: string | number, coinIndex: number): string => {
+export const normalizePrice = (price: string | number, coinIndex: number): number => {
     if (coinIndex !== 2) {
-        return String(price);
+        return Number(price);
     }
 
     const str = String(price).trim();
@@ -19,7 +19,7 @@ const normalizePrice = (price: string | number, coinIndex: number): string => {
         fracPart = fracRaw.padEnd(3, '0');
     }
 
-    return intPartRaw + fracPart;
+    return Number(intPartRaw + fracPart);
 };
 
 

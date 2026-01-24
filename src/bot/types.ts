@@ -14,7 +14,7 @@ export type SymbolType = {
 };
 
 
-export type StartOptionsType = Omit<ParamsTypeForConservativeStrategy,  'position' | 'balance' | 'orders' | 'candles'> & {
+export type StartOptionsType = Omit<ParamsTypeForConservativeStrategy,  'position' | 'balance' | 'orders' | 'candles' | 'optLeverage' | 'beActive' | 'trailingActive' | 'entryPrice'> & {
     strategyFunc: (p:ParamsForSomeStrategy)=> ActionsTypes[];
   };
 export type OptionsForEngine = ParamsTypeForConservativeStrategy
@@ -36,7 +36,7 @@ export type OrderType = {
     filled_base_amount: string;
     filled_quote_amount: string;
     side: string;
-    type: 'limit' | 'market';
+    type: 'limit' | 'market' | 'stop-loss' | 'take-profit' ;
     time_in_force: 'good-till-time' | 'immediate-or-cancel' | 'fill-or-kill';
     reduce_only: boolean;
     trigger_price: string;

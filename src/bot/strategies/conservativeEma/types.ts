@@ -18,4 +18,8 @@ export type ParamsTypeForConservativeStrategy = {
     position: number;
     symbol: SymbolType;
     orders: OrderType[];
+    optLeverage: number;
+    beActive: boolean;
+    trailingActive: boolean;
+    entryPrice: string;
 }

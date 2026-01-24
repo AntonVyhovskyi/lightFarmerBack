@@ -18,19 +18,21 @@ export class BotManager {
         const botId = `${options.symbol.name}-${options.timeframe}`;
         if (this.bots.has(botId)) return botId;
         let candles: string[][] = [];
-        // if (candles.length === 0) {
-        //     candles = await getCandlesFromBinance(options.symbol.name, options.timeframe, 500);
-        // }
+        if (candles.length === 0) {
+            candles = await getCandlesFromBinance(options.symbol.name, options.timeframe, 500);
+        }
         let orders: OrderType[] = [];
         let position: number = 0;
         let balance: { total: number; avaliable: number } = { total: 0, avaliable: 0 };
-        let leverage: number = 0;
+        let currentLeverage: number = 0;
         let trailingActive: boolean = false;
+        let beActive: boolean = false;
+        let entryPrice: string = "0";
 
         // change leverage on start --------------------------------------------------------------------------
         try {
-           await excutor([{ type: 'updateLeverage', options: { marketIndex: options.symbol.index, leverage: options.leverage } }]);
-           leverage = options.leverage;
+            await excutor([{ type: 'updateLeverage', options: { marketIndex: options.symbol.index, leverage: options.leverage } }]);
+            currentLeverage = options.leverage;
         } catch (error) {
             console.error("Error executing leverage change on bot start:", error);
         }
@@ -39,22 +41,6 @@ export class BotManager {
         // ---------------------------------------------------------------------------------------------------
 
 
-        const candlesWS = subscribeBinanceCandlesWS(options.symbol.name, options.timeframe, async (candle) => {
-
-            candles.push(candle);
-            if (candles.length > 500) {
-                candles.shift();
-            }
-            const actions =  await botEngine({...options, candles, position, orders, balance, leverage}, getActionsFromConservativeEmaStrategy);
-            actions.forEach(async (action) => {
-                if (action.type === 'updateLeverage' && action.options.leverage !== leverage) {
-                    leverage = action.options.leverage;
-                }
-                if (action.type === 'trailingActive') {
-                    trailingActive = action.options.isActive;
-                }
-            });
-        })
 
 
         const accountWS = subscribeToAccountAllWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
@@ -66,6 +52,9 @@ export class BotManager {
                     position = -data.positions?.[key]?.position || 0;
                 }
             }
+
+            entryPrice = data.positions?.[key]?.avg_entry_price || 0;
+
 
 
 
@@ -96,12 +85,36 @@ export class BotManager {
                 };
 
             }
-            
+
 
 
         }, (error) => {
             console.error("Account Stats WS error:", error);
         });
+
+
+
+
+        const candlesWS = subscribeBinanceCandlesWS(options.symbol.name, options.timeframe, async (candle) => {
+            console.log("--------=======-----------===========-------------");
+
+            candles.push(candle);
+            if (candles.length > 500) {
+                candles.shift();
+            }
+            const actions = await botEngine({ ...options, candles, position: Number(position), orders, balance, leverage: currentLeverage, optLeverage: options.leverage, beActive, trailingActive, entryPrice }, getActionsFromConservativeEmaStrategy);
+            actions.forEach(async (action) => {
+                if (action.type === 'updateLeverage' && action.options.leverage !== currentLeverage) {
+                    currentLeverage = action.options.leverage;
+                }
+                if (action.type === 'trailingActive') {
+                    trailingActive = action.options.isActive;
+                }
+                if (action.type === 'beActive') {
+                    beActive === action.options.isActive;
+                }
+            });
+        })
 
         this.bots.set(botId, {
             stop: async () => {
@@ -118,16 +131,16 @@ export class BotManager {
 
 const botManager = new BotManager();
 botManager.start({
-    emaShortPeriod: 20,
+    emaShortPeriod: 3,
     emaLongPeriod: 50,
     atrPeriod: 14,
-    atrRange: 14,
-    riskPct: 1,
-    atrPctforSL: 1.5,
-    trailStartFromParams: 2,
-    trailGapFromParams: 1,
+    atrRange: 0.1,
+    riskPct: 0.5,
+    atrPctforSL: 0.5,
+    trailStartFromParams: 0.5,
+    trailGapFromParams: 0.5,
     leverage: 10,
-    bePrc: 0.5,
+    bePrc: 0.4,
     timeframe: "1m",
     symbol: { name: "SOL", index: 2 },
     strategyFunc: getActionsFromConservativeEmaStrategy

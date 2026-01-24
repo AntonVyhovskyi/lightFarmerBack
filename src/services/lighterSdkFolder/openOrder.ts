@@ -8,7 +8,8 @@ export async function openOrder(marketIndex: number = 0, isAsk: boolean = false,
     if (!baseAmount) {
         throw new Error("Base amount is required to open an order.");
     }
-    const result = await signer.createUnifiedOrder({
+    try {
+         const result = await signer.createUnifiedOrder({
         marketIndex,              // ETH market
         clientOrderIndex: Date.now(), // Unique ID
         baseAmount,           // 0.01 ETH (scaled: 1 ETH = 1,000,000)
@@ -29,7 +30,15 @@ export async function openOrder(marketIndex: number = 0, isAsk: boolean = false,
         //     isLimit: false              // Market TP
         // }
     });
+    console.log(result);
+    
     return result;
+    } catch (error) {
+        console.log(error);
+        return error;
+        
+    }
+   
 }
 
 // openOrder(2, false, 100 , 141700, 0.001, 138000, 143000).then((result) => {
