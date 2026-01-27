@@ -1,9 +1,11 @@
+import { normalize } from "node:path";
 import { getSigner } from "./client";
 import { OrderType } from 'lighter-ts-sdk';
+import { normalizePrice } from "../../bot/strategies/tools/normalizePrice";
 
 
 
-export async function openOrder(marketIndex: number = 0, isAsk: boolean = false, baseAmount: number, idealPrice: number, stopLossTrigger: number, takeProfitTrigger?: number, maxSlippage: number = 0.001) {
+export async function openOrder(marketIndex: number = 0, isAsk: boolean = false, baseAmount: number, idealPrice: number, stopLossTrigger: number, priceForSL: number, takeProfitTrigger?: number, maxSlippage: number = 0.001) {
     const signer = await getSigner();
     if (!baseAmount) {
         throw new Error("Base amount is required to open an order.");
@@ -13,15 +15,16 @@ export async function openOrder(marketIndex: number = 0, isAsk: boolean = false,
         marketIndex,              // ETH market
         clientOrderIndex: Date.now(), // Unique ID
         baseAmount,           // 0.01 ETH (scaled: 1 ETH = 1,000,000)
-        isAsk,                // BUY (true = SELL)
+        isAsk: !isAsk,                // BUY (true = SELL)
         orderType: OrderType.MARKET,
 
         // Slip page protection
         idealPrice,           // Ideal price ($4000)
-        maxSlippage,           // Max 0.1% slippage
+        maxSlippage: 0.1,           // Max 0.1% slippage
 
         // Automatic stop-loss and take-profit
         stopLoss: {
+            price: priceForSL   ,    // Stop loss at $3800
             triggerPrice: stopLossTrigger,       // Stop loss at $3800
             isLimit: false              // Market SL
         },

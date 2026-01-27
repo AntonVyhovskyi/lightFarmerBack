@@ -12,16 +12,13 @@ export const normalizePrice = (price: string | number, coinIndex: number): numbe
         throw new Error(`Invalid price: ${price}`);
     }
 
-    let fracPart = '000';
+    let fracPart = (fracRaw.split('')[0] ? fracRaw.split('')[0] : '0') + (fracRaw.split('')[1] ? fracRaw.split('')[1] : '0') + (fracRaw.split('')[2] ? fracRaw.split('')[2] : '0');
 
-    // якщо після крапки є рівно 1–3 цифри — беремо
-    if (fracRaw && /^\d{1,3}$/.test(fracRaw)) {
-        fracPart = fracRaw.padEnd(3, '0');
-    }
+   
 
     return Number(intPartRaw + fracPart);
 };
 
 
-console.log(normalizePrice('2132.123123123', 2));
+// console.log(normalizePrice(126.62325, 2));
 

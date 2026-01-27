@@ -13,7 +13,7 @@ export const excutor = async (actions: ActionsTypes[]) => {
         } else if (action.type === 'closePosition') {
             await closePosition(action.options.marketIndex, action.options.quantity, action.options.size, Number(action.options.price));
         } else if (action.type === 'openPosition') {
-            await openOrder(action.options.marketIndex, action.options.size, action.options.quantity, Number(action.options.price), Number(action.options.slPrice));
+            await openOrder(action.options.marketIndex, action.options.size, action.options.quantity, Number(action.options.price), Number(action.options.slTrigerPrice), Number(action.options.slPrice));
         } else if (action.type === 'updateOrder') {
             updateOrder(action.options.marketIndex, action.options.orderIndex, action.options.baseAmount, action.options.price, action.options.triggerPrice);
         }

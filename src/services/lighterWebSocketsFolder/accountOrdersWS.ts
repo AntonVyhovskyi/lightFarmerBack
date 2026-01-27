@@ -13,6 +13,8 @@ export async function subscribeToAccountOrdersWS(accountIndex: number, marketInd
 
     const ws = new WebSocket(`wss://mainnet.zklighter.elliot.ai/stream`);
 
+
+
     ws.on("open", () => {
         console.log('WebSocket connection opened for account orders stream.', accountIndex);
         ws.send(JSON.stringify({
@@ -23,15 +25,42 @@ export async function subscribeToAccountOrdersWS(accountIndex: number, marketInd
 
     });
 
+    ws.on('ping', () => {
+
+        ws.pong()
+    })
+
 
     ws.on('message', (data) => {
-        onMessage(JSON.parse(data.toString()));
+        const text = data.toString();
+
+       
+        if (text === 'ping') {
+            ws.send('pong');
+            return;
+        }
+
+      
+        try {
+            const msg = JSON.parse(text);
+
+            if (msg?.type === 'ping') {
+                ws.send(JSON.stringify({ type: 'pong' }));
+                return;
+            }
+
+            onMessage(msg);
+        } catch {
+            
+            console.log('NON-JSON:', text);
+        }
     });
 
     ws.on('error', (error) => {
         onError(error);
     });
     ws.on('close', (code, reason) => {
+   
         console.log('WS closed', {
             channel: `account_orders/${marketIndex}/${accountIndex}`,
             code,

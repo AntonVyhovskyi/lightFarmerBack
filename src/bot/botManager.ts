@@ -3,18 +3,22 @@ import { subscribeBinanceCandlesWS } from "../services/binanceWebSocketsFolder/c
 import { subscribeToAccountOrdersWS } from "../services/lighterWebSocketsFolder/accountOrdersWS";
 import { subscribeToAccountAllWS } from "../services/lighterWebSocketsFolder/accountAllWS";
 import { OrderType, StartOptionsType } from "./types";
-import dotenv from 'dotenv';
 import { subscribeToAccountStatsWS } from "../services/lighterWebSocketsFolder/accountStatsWS";
 import { excutor } from "./execution/executor";
 import { botEngine } from "./botEngine";
 import { getActionsFromConservativeEmaStrategy } from "./strategies/conservativeEma/conservativeEmaStrategy";
+import { startEventLoopLagMonitor } from "./strategies/tools/testEventLoop";
 
-dotenv.config();
 
 export class BotManager {
     private bots = new Map<string, { stop: () => Promise<void> }>();
 
     async start(options: StartOptionsType) {
+        if(this.bots.size > 0) {
+            console.log("A bot is already running. Only one bot can be run at a time.");
+            throw new Error("A bot is already running. Only one bot can be run at a time.");
+        }
+        startEventLoopLagMonitor();
         const botId = `${options.symbol.name}-${options.timeframe}`;
         if (this.bots.has(botId)) return botId;
         let candles: string[][] = [];
@@ -98,22 +102,23 @@ export class BotManager {
         const candlesWS = subscribeBinanceCandlesWS(options.symbol.name, options.timeframe, async (candle) => {
             console.log("--------=======-----------===========-------------");
 
+
             candles.push(candle);
             if (candles.length > 500) {
                 candles.shift();
             }
+            if (accountWS.readyState !== 1 || ordersWS.readyState !== 1 || accountStatsWS.readyState !== 1) {
+                console.log("One of the WS is not open yet. Skipping candle processing.");
+                return;
+            }
             const actions = await botEngine({ ...options, candles, position: Number(position), orders, balance, leverage: currentLeverage, optLeverage: options.leverage, beActive, trailingActive, entryPrice }, getActionsFromConservativeEmaStrategy);
-            actions.forEach(async (action) => {
+            for (const action of actions) {
                 if (action.type === 'updateLeverage' && action.options.leverage !== currentLeverage) {
                     currentLeverage = action.options.leverage;
                 }
-                if (action.type === 'trailingActive') {
-                    trailingActive = action.options.isActive;
-                }
-                if (action.type === 'beActive') {
-                    beActive === action.options.isActive;
-                }
-            });
+                if (action.type === 'trailingActive') trailingActive = action.options.isActive;
+                if (action.type === 'beActive') beActive = action.options.isActive; 
+            }
         })
 
         this.bots.set(botId, {
@@ -125,23 +130,38 @@ export class BotManager {
                 this.bots.delete(botId);
             }
         });
+        return botId;
 
+    }
+
+    async stop(botId: string) {
+        const bot = this.bots.get(botId);
+        if (bot) {
+            await bot.stop();
+
+        } else {
+            throw new Error(`Bot with ID ${botId} not found.`);
+        }
+    }
+
+    async getBots() {
+        return Array.from(this.bots.keys());
     }
 }
 
-const botManager = new BotManager();
-botManager.start({
-    emaShortPeriod: 3,
-    emaLongPeriod: 50,
-    atrPeriod: 14,
-    atrRange: 0.1,
-    riskPct: 0.5,
-    atrPctforSL: 0.5,
-    trailStartFromParams: 0.5,
-    trailGapFromParams: 0.5,
-    leverage: 10,
-    bePrc: 0.4,
-    timeframe: "1m",
-    symbol: { name: "SOL", index: 2 },
-    strategyFunc: getActionsFromConservativeEmaStrategy
-});
+// const botManager = new BotManager();
+// botManager.start({
+//     emaShortPeriod: 3,
+//     emaLongPeriod: 10,
+//     atrPeriod: 14,
+//     atrRange: 0.01,
+//     riskPct: 0.5,
+//     atrPctforSL: 2.5,
+//     trailStartFromParams: 0.2,
+//     trailGapFromParams: 0.1,
+//     leverage: 10,
+//     bePrc: 0.1,
+//     timeframe: "1m",
+//     symbol: { name: "SOL", index: 2 },
+//     strategyFunc: getActionsFromConservativeEmaStrategy
+// });
