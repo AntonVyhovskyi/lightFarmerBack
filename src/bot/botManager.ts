@@ -47,7 +47,7 @@ export class BotManager {
 
 
 
-        const accountWS = subscribeToAccountAllWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
+        const accountWS = await subscribeToAccountAllWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
 
             const key = String(options.symbol.index); // '2'
             if (data.positions?.[key]) {
@@ -81,7 +81,7 @@ export class BotManager {
             console.error("Orders WS error:", error);
         });
 
-        const accountStatsWS = subscribeToAccountStatsWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
+        const accountStatsWS = await subscribeToAccountStatsWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
             if (data.stats?.available_balance !== undefined) {
                 balance = {
                     total: Number(data.stats.portfolio_value || "0"),

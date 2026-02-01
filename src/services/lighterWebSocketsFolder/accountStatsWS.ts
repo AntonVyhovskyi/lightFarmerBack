@@ -1,63 +1,94 @@
 import WebSocket from 'ws';
 
-export function subscribeToAccountStatsWS(accountIndex: number, onMessage: (data: any) => void, onError: (error: any) => void) {
-
-    const ws = new WebSocket(`wss://mainnet.zklighter.elliot.ai/stream`);
+export async function subscribeToAccountStatsWS(accountIndex: number, onMessage: (data: any) => void, onError: (error: any) => void) {
 
 
 
-    ws.on("open", () => {
+
+    let current: WebSocket | null = null;
+    let manualStop = false;
+
+    const handle = {
+        get readyState() {
+            return current?.readyState ?? WebSocket.CLOSED;
+        },
+        close() {
+            manualStop = true;
+            try {
+                current?.close(1000, "manual stop");
+            } catch { }
+        },
+        getWS() {
+            return current;
+        },
+    };
+    const connect = async () => {
+        const ws = new WebSocket(`wss://mainnet.zklighter.elliot.ai/stream`);
+
+        current = ws;
+
+        ws.on("open", () => {
 
 
-        ws.send(JSON.stringify({
-            type: "subscribe",
-            channel: `user_stats/${accountIndex}`,
-        }));
-    });
+            ws.send(JSON.stringify({
+                type: "subscribe",
+                channel: `user_stats/${accountIndex}`,
+            }));
+        });
 
 
-    ws.on('message', (data) => {
-        const text = data.toString();
+        ws.on('message', (data) => {
+            const text = data.toString();
 
 
-        if (text === 'ping') {
-            ws.send('pong');
-            return;
-        }
-
-
-        try {
-            const msg = JSON.parse(text);
-
-            if (msg?.type === 'ping') {
-                ws.send(JSON.stringify({ type: 'pong' }));
+            if (text === 'ping') {
+                ws.send('pong');
                 return;
             }
 
-            onMessage(msg);
-        } catch {
 
-            console.log('NON-JSON:', text);
-        }
+            try {
+                const msg = JSON.parse(text);
 
-    });
-    ws.on('ping', () => ws.pong())
+                if (msg?.type === 'ping') {
+                    ws.send(JSON.stringify({ type: 'pong' }));
+                    return;
+                }
 
+                onMessage(msg);
+            } catch {
 
-    ws.on('error', (error) => {
-        onError(error);
-    });
+                console.log('NON-JSON:', text);
+            }
 
-    ws.on('close', (code, reason) => {
-       
-        console.log('WS closed', {
-            channel: `user_stats/${accountIndex}`,
-            code,
-            reason: reason?.toString(),
         });
-    });
+        ws.on('ping', () => ws.pong())
 
-    return ws;
+
+        ws.on('error', (error) => {
+            onError(error);
+        });
+
+        ws.on('close', (code, reason) => {
+
+            console.log('WS closed', {
+                channel: `user_stats/${accountIndex}`,
+                code,
+                reason: reason?.toString(),
+            });
+            if (manualStop) return;
+
+            // реконектимось на ненормальні кейси
+            if (code === 1006 || code === 1008 || code === 1011 || code === 1012 || code === 1005) {
+                setTimeout(() => void connect(), 1000);
+            }
+        });
+
+    }
+
+
+    await connect();
+    return handle;
 }
 
 
