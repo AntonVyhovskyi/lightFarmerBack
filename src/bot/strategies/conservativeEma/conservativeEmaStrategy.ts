@@ -90,7 +90,7 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
             console.log(`⛔ Not enough balance to open long position. Required margin: ${nMargin}, Available balance: ${balance.total}`);
             const newLeverage = Math.ceil(notional / balance.total);
 
-            if (newLeverage > 20) {
+            if (newLeverage > 25) {
                 console.log('За велика позиція для данного ризик менеджменту');
                 return [] as ActionsTypes[];
             }
@@ -122,7 +122,7 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
         if (nMargin > balance.total) {
             console.log(`⛔ Not enough balance to open short position. Required margin: ${nMargin}, Available balance: ${balance.total}`);
             const newLeverage = Math.ceil(notional / balance.total);
-            if (newLeverage > 20) {
+            if (newLeverage > 25) {
                 console.log('За велика позиція для данного ризик менеджменту');
                 return [];
             }
