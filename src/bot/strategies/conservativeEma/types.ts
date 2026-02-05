@@ -6,7 +6,11 @@ export type ParamsTypeForConservativeStrategy = {
     emaLongPeriod: number;
     atrPeriod: number;
     atrRange: number;
+    atrRange2: number;
+    atrRange3: number;
     riskPct: number;
+    riskPct2: number;
+    riskPct3: number;
     atrPctforSL: number;
     trailStartFromParams: number;
     trailGapFromParams: number;
@@ -22,4 +26,5 @@ export type ParamsTypeForConservativeStrategy = {
     beActive: boolean;
     trailingActive: boolean;
     entryPrice: string;
+    averageValumesMultiple: number;
 }

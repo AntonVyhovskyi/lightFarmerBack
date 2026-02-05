@@ -1,5 +1,5 @@
 import { normalizePrice } from './../tools/normalizePrice';
-import { ATR, EMA } from "technicalindicators";
+import { ATR, EMA, SMA } from "technicalindicators";
 import { ActionsTypes } from "../../execution/types";
 import { ParamsTypeForConservativeStrategy } from "./types";
 import { normalizeQty } from '../tools/normalizeQty';
@@ -28,7 +28,11 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
         emaLongPeriod,
         atrPeriod,
         atrRange,
+        atrRange2,
+        atrRange3,  
         riskPct,
+        riskPct2,
+        riskPct3,
         atrPctforSL,
         trailStartFromParams,
         trailGapFromParams,
@@ -42,16 +46,19 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
         optLeverage,
         beActive,
         trailingActive,
-        entryPrice
+        entryPrice,
+        averageValumesMultiple
     } = options;
 
     const closes = candles.map(c => parseFloat(c[4]));
     const highs = candles.map(c => parseFloat(c[2]));
     const lows = candles.map(c => parseFloat(c[3]));
+    const valumes = candles.map(c => parseFloat(c[5]));
 
     const emaShortValues = EMA.calculate({ values: closes, period: emaShortPeriod });
     const emaLongValues = EMA.calculate({ values: closes, period: emaLongPeriod });
     const atrValues = ATR.calculate({ close: closes, high: highs, low: lows, period: atrPeriod });
+    const averageValumes = SMA.calculate({ values: valumes, period: 50 });
 
     const emaShort = emaShortValues[emaShortValues.length - 1];
     const emaLong = emaLongValues[emaLongValues.length - 1];
@@ -59,9 +66,12 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
     const prevEmaShort = emaShortValues[emaShortValues.length - 2];
     const prevEmaLong = emaLongValues[emaLongValues.length - 2];
 
+
     const atr = atrValues[atrValues.length - 1];
 
     const price = closes[closes.length - 1];
+    const valume = Number(candles[candles.length - 1][5]);
+    const prevValume = Number(candles[candles.length - 2][5]);
 
 
 
@@ -70,10 +80,10 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
     // ____________________________________________________________________________________________
 
 
-    const openBuyOrder = (slPrice: number) => {
+    const openBuyOrder = (slPrice: number, shouldRiskPct: number) => {
 
 
-        const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, riskPct, price, slPrice, leverage, "long");
+        const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, shouldRiskPct, price, slPrice, leverage, "long");
         const fixedSlPrice = normalizePrice(slPrice, symbol.index);
         const fixedPrice = normalizePrice(price, symbol.index);
         if (nMargin > balance.total) {
@@ -104,8 +114,8 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
     }
 
 
-    const openSellOrder = async (slPrice: number) => {
-        const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, riskPct, price, slPrice, leverage, "short");
+    const openSellOrder = async (slPrice: number, shouldRiskPct: number) => {
+        const { qty, nMargin, notional } = calculateQtyAndNMargin(balance.total, shouldRiskPct, price, slPrice, leverage, "short");
         const fixedSlPrice = normalizePrice(slPrice, symbol.index);
         const fixedPrice = normalizePrice(price, symbol.index);
 
@@ -163,8 +173,14 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
                 const priceChangePct = ((closes[closes.length - 1] - minLastFive) / minLastFive) * 100;
                 // if (true) {
                 if (priceChangePct >= atrRange) {
+                    if (averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < valume
+                        || averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < prevValume) {
+                        console.log('слабий валюм для відкриття позиції', { valume, prevValume, mustBe: averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) });
+
+                    }
+                    const shouldRiskPct = priceChangePct >= atrRange3 ? riskPct3 : priceChangePct >= atrRange2 ? riskPct2 : riskPct;
                     const slPrice = closes[closes.length - 1] - atr * (atrPctforSL);
-                    openBuyOrder(slPrice);
+                    openBuyOrder(slPrice, shouldRiskPct);
                 } else {
                     console.log("Слабо виражений сигнал на продаж (Сила руху)", { atrRange, priceChangePct });
                 }
@@ -173,8 +189,13 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
                 const maxLastFive = Math.max(...lastFiveClothes);
                 const priceChangePct = ((maxLastFive - closes[closes.length - 1]) / maxLastFive) * 100;
                 if (priceChangePct >= atrRange) {
+                        if (averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < valume
+                    || averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < prevValume) {
+                        console.log('слабий валюм для відкриття позиції', { valume, prevValume, mustBe: averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) });
+                    }
+                    const shouldRiskPct = priceChangePct >= atrRange3 ? riskPct3 : priceChangePct >= atrRange2 ? riskPct2 : riskPct;
                     const slPrice = closes[closes.length - 1] + atr * (atrPctforSL);
-                    openSellOrder(slPrice);
+                    openSellOrder(slPrice, shouldRiskPct);
                 } else {
                     console.log("Слабо виражений сигнал на продаж ((Сила руху))", { atrRange, priceChangePct });
                 }

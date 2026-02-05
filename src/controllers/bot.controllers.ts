@@ -24,7 +24,32 @@ const serializeError = (err: unknown) => {
 
 export const startBotController = async (req: Request, res: Response) => {
   const options: StartOptionsType = req.body;
-
+  
+  const requireFields: (keyof StartOptionsType)[] = [
+    'symbol',
+    'timeframe',
+    'leverage',
+    'emaShortPeriod',
+    'emaLongPeriod',
+    'atrPeriod',
+    'atrRange',
+    'atrRange2',
+    'atrRange3',
+    'riskPct',
+    'riskPct2',
+    'riskPct3',
+    'atrPctforSL',
+    'trailStartFromParams',
+    'trailGapFromParams',
+    'bePrc',
+    'averageValumesMultiple'
+  ];
+  const missing = requireFields.filter (key=>{
+    return options[key] === undefined || options[key] === null;
+  })
+  if (missing.length > 0) {
+    return res.status(400).json({ error: "Missing required parameters", missing });
+  }
   try {
     const botId = await botManager.start({
       ...options,
