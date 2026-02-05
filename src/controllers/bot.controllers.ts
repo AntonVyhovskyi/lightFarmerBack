@@ -10,17 +10,36 @@ const botManager = new BotManager();
 
 
 
+const serializeError = (err: unknown) => {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+  // якщо кидають не Error, а строку/обʼєкт
+  return { value: err };
+};
+
 export const startBotController = async (req: Request, res: Response) => {
-    const options: StartOptionsType = req.body;
-    try {
-        const botId = await botManager.start({...options, strategyFunc: getActionsFromConservativeEmaStrategy});
-        return res.status(200).json({ botId });
-    } catch (error) {
-        return res.status(500).json({ error: 'Failed to start bot', details: error });
-    }
-    
-    
-}
+  const options: StartOptionsType = req.body;
+
+  try {
+    const botId = await botManager.start({
+      ...options,
+      strategyFunc: getActionsFromConservativeEmaStrategy,
+    });
+
+    return res.status(200).json({ botId });
+  } catch (err) {
+    console.error("Failed to start bot:", err);
+    return res.status(500).json({
+      error: "Failed to start bot",
+      details: serializeError(err),
+    });
+  }
+};
 
 
 export const stopBotController = async (req: Request, res: Response) => {
