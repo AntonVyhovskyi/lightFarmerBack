@@ -2,7 +2,7 @@ import { getCandlesFromBinance } from "../services/binanceApiFolder/getCandles";
 import { subscribeBinanceCandlesWS } from "../services/binanceWebSocketsFolder/candleWS";
 import { subscribeToAccountOrdersWS } from "../services/lighterWebSocketsFolder/accountOrdersWS";
 import { subscribeToAccountAllWS } from "../services/lighterWebSocketsFolder/accountAllWS";
-import { OrderType, StartOptionsType } from "./types";
+import { OrderType, StartOptionsType, startTrailingOptionsType } from "./types";
 import { subscribeToAccountStatsWS } from "../services/lighterWebSocketsFolder/accountStatsWS";
 import { excutor } from "./execution/executor";
 import { botEngine } from "./botEngine";
@@ -13,7 +13,7 @@ import { startEventLoopLagMonitor } from "./strategies/tools/testEventLoop";
 export class BotManager {
     private bots = new Map<string, { stop: () => Promise<void> }>();
 
-    async start(options: StartOptionsType) {
+    async start(options: StartOptionsType ) {
         if(this.bots.size > 0) {
             console.log("A bot is already running. Only one bot can be run at a time.");
             throw new Error("A bot is already running. Only one bot can be run at a time.");
@@ -133,6 +133,8 @@ export class BotManager {
         return botId;
 
     }
+
+    
 
     async stop(botId: string) {
         const bot = this.bots.get(botId);

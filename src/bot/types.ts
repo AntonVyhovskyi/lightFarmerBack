@@ -1,6 +1,7 @@
 import { ParamsForSomeStrategy } from './strategies/types';
 import { ActionsTypes } from "./execution/types";
 import { ParamsTypeForConservativeStrategy } from "./strategies/conservativeEma/types";
+import { ParamsTypeForStopLossTrailing } from './strategies/stopLossTrailing/types';
 
 export type SymbolType = {
     name: "ETH",
@@ -11,13 +12,24 @@ export type SymbolType = {
 } | {
     name: "SOL",
     index: 2
+} | {
+    name: "LIT",
+    index: 120
 };
+type ParametersForSomeStart = Omit<ParamsTypeForConservativeStrategy, 'position' | 'balance' | 'orders' | 'candles' | 'optLeverage' | 'beActive' | 'trailingActive' | 'entryPrice'>
+   
+
+export type StartOptionsType = ParametersForSomeStart
+    & {
+        strategyFunc: (p: ParamsForSomeStrategy ) => ActionsTypes[];
+    };
+
+export type startTrailingOptionsType = Omit<ParamsTypeForStopLossTrailing, 'position' | 'orders' | 'candle'> & {
+    strategyFunc: (p: ParamsTypeForStopLossTrailing) => ActionsTypes[];
+}
 
 
-export type StartOptionsType = Omit<ParamsTypeForConservativeStrategy,  'position' | 'balance' | 'orders' | 'candles' | 'optLeverage' | 'beActive' | 'trailingActive' | 'entryPrice'> & {
-    strategyFunc: (p:ParamsForSomeStrategy)=> ActionsTypes[];
-  };
-export type OptionsForEngine = ParamsTypeForConservativeStrategy
+export type OptionsForEngine = ParamsTypeForConservativeStrategy ;
 
 export type OrderType = {
     order_index: number;
@@ -36,7 +48,7 @@ export type OrderType = {
     filled_base_amount: string;
     filled_quote_amount: string;
     side: string;
-    type: 'limit' | 'market' | 'stop-loss' | 'take-profit' ;
+    type: 'limit' | 'market' | 'stop-loss' | 'take-profit';
     time_in_force: 'good-till-time' | 'immediate-or-cancel' | 'fill-or-kill';
     reduce_only: boolean;
     trigger_price: string;

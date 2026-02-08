@@ -1,3 +1,4 @@
+import { log } from 'node:console';
 import WebSocket from 'ws';
 
 export function subscribeBinanceCandlesWS(symbol: string, interval: string, onClose: (candle: string[]) => void) {
@@ -8,6 +9,8 @@ export function subscribeBinanceCandlesWS(symbol: string, interval: string, onCl
         fixedSymbolString = 'ethusdc'
     } else if (symbol === 'SOL') {
         fixedSymbolString = 'solusdc'
+    } else if (symbol === 'LIT') {
+        fixedSymbolString = 'litusdt'
     }
     const wsUrl = `wss://fstream.binance.com/ws/${fixedSymbolString}@kline_${interval}`;
     const ws = new WebSocket(wsUrl);
@@ -34,6 +37,7 @@ export function subscribeBinanceCandlesWS(symbol: string, interval: string, onCl
                 parseFloat(k.Q || 0), // 10 taker buy quote
                 0                     // 11 ігноруємо
             ];
+            log(`Закрита свічка для ${symbol} ${interval}:`, candleArray);
             onClose(candleArray);
         }
     });
