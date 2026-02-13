@@ -8,7 +8,7 @@ import cors from 'cors';
 
 dotenv.config();
 
-const port = process.env.PORT || 3000;
+
 
 const app = express();
 app.use(express.json());
@@ -19,6 +19,7 @@ app.use("/api", routes)
 
 
  
-app.listen(port, () => {
-  console.log(`Server is running at http://localhost:${port}`);
+const port = Number(process.env.PORT) || 8080;
+app.listen(port, "0.0.0.0", () => {
+  console.log(`Server is running on 0.0.0.0:${port}`);
 });
