@@ -24,6 +24,7 @@ const serializeError = (err: unknown) => {
 
 export const startBotController = async (req: Request, res: Response) => {
   const options: StartOptionsType = req.body;
+ 
   
   const requireFields: (keyof StartOptionsType)[] = [
     'symbol',
@@ -52,7 +53,7 @@ export const startBotController = async (req: Request, res: Response) => {
   }
   try {
     const botId = await botManager.start({
-      ...options,
+       ...options,
       strategyFunc: getActionsFromConservativeEmaStrategy,
     });
 
