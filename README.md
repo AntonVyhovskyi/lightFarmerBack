@@ -58,74 +58,86 @@ The **Conservative EMA Strategy** combines trend following, volatility-based pos
     - or skip the trade if it is still too large.
 
 - **Stop-loss placement (ATR-based)**
-  - Initial SL is placed at a distance of `atrPctforSL * ATR` from the entry price:
+  - The initial SL is placed at a distance of `atrPctforSL * ATR` from the entry price:
     - below the entry for long positions,
     - above the entry for short positions.
   - Orders are normalized to the correct tick/step for the given market.
 
 - **Break-even activation**
-  - When price moves in profit by a configured percentage (`bePrc`), and trailing is not yet active:
+  - When the price moves into profit by a configured percentage (`bePrc`), and trailing is not yet active:
     - the strategy activates **break-even mode**,
     - moves the stop-loss closer to (or slightly beyond) the entry price to remove downside risk.
 
 - **Trailing stop logic**
-  - When price reaches a further profit threshold (`trailStartFromParams`), the strategy switches to **trailing mode**:
-    - stop-loss is moved to follow the price with a gap defined by `trailGapFromParams` (% of price),
+  - When the price reaches a further profit threshold (`trailStartFromParams`), the strategy switches to **trailing mode**:
+    - the stop-loss is moved to follow the price with a gap defined by `trailGapFromParams` (% of price),
     - SL is only moved in the direction of profit (never loosened).
-  - Logic is symmetric for long and short positions.
+  - The logic is symmetric for long and short positions.
 
 - **Leverage and state management**
-  - On new entries, if current leverage differs from the configured optimal leverage (`optLeverage`), the strategy requests a leverage update.
+  - On new entries, if the current leverage differs from the configured optimal leverage (`optLeverage`), the strategy requests a leverage update.
   - If a position is already open, new entry signals are ignored; only SL/BE/trailing updates are applied.
-  - For opposite signals (e.g. long signal while in a short), the strategy first closes the existing position before opening a new one (if risk conditions are met).
- 
-  
- ### Getting started  
+  - For opposite signals (e.g. a long signal while in a short), the strategy first closes the existing position before opening a new one (if risk conditions are met).
+
+### Getting started
 
 1. **Install dependencies**
 
+   ```bash
    npm install
-   or
+   # or
    yarn
+   ```
 
-2. Configure environment variables (e.g. in .env)
+2. **Configure environment variables (e.g. in `.env`)**
 
-  API_PRIVATE_KEY=6fc3ce027*****
-  ACCOUNT_INDEX=2*****
-  API_KEY_INDEX=**
-  BASE_URL=https://mainnet.zklighter.elliot.ai
+   ```env
+   API_PRIVATE_KEY=6fc3ce027*****
+   ACCOUNT_INDEX=2*****
+   API_KEY_INDEX=**
+   BASE_URL=https://mainnet.zklighter.elliot.ai
+   ```
 
-  Account index you can get via get request from example
- <img width="1390" height="638" alt="image" src="https://github.com/user-attachments/assets/b2d2d20a-b26f-492b-8846-16a15f675685" />
+   You can get the account index via a GET request, as shown in the example below:
 
- You can get the API private key and key index on the website in the trading UI: Tools → API Keys.
+   <img width="1390" height="638" alt="image" src="https://github.com/user-attachments/assets/b2d2d20a-b26f-492b-8846-16a15f675685" />
 
-3. Run server
-   
+   You can get the API private key and key index on the website in the trading UI: **Tools → API Keys**.
+
+3. **Run the server**
+
+   ```bash
    npm run dev
-   
-   or
-   
+   # or
    npm run start
+   ```
 
-5. Control the bot via HTTP requests
-   
-   - Request for starting. https://***/api/bot/start It`s post request with body has parameters. See screenshot for example
-   
-<img width="963" height="643" alt="image" src="https://github.com/user-attachments/assets/ada02ed0-15d8-4976-a9d3-75bc7662c7eb" />
+4. **Control the bot via HTTP requests**
 
-   - Request to get the bot ID and check whether it is active.
-   If an ID is returned, it means the bot is running.
-   GET https://***/api/bot
+   - **Start the bot**
 
-   - Request to stop rinning
-  Post with body
-  {
-	"botId": "***"
-  }
+     `POST https://***/api/bot/start`  
+     This is a POST request with a JSON body containing strategy parameters (see the screenshot below for an example):
 
-  POST https://***/api/bot/stop
+     <img width="963" height="643" alt="image" src="https://github.com/user-attachments/assets/ada02ed0-15d8-4976-a9d3-75bc7662c7eb" />
 
+   - **Check if the bot is running / get bot ID**
 
-  ## You can now deploy the service and use it online.
+     `GET https://***/api/bot`  
+
+     If an ID is returned, it means the bot is currently running.
+
+   - **Stop the bot**
+
+     `POST https://***/api/bot/stop`  
+
+     Request body example:
+
+     ```json
+     {
+       "botId": "***"
+     }
+     ```
+
+## You can now deploy the service and use it online.
 ## Wishing you successful trading.
