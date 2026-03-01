@@ -22,6 +22,7 @@ type ParametersForSomeStart = Omit<ParamsTypeForConservativeStrategy, 'position'
 export type StartOptionsType = ParametersForSomeStart
     & {
         strategyFunc: (p: ParamsForSomeStrategy ) => ActionsTypes[];
+        withRestart?: boolean;
     };
 
 export type startTrailingOptionsType = Omit<ParamsTypeForStopLossTrailing, 'position' | 'orders' | 'candle'> & {

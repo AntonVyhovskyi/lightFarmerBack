@@ -10,8 +10,10 @@ import { getActionsFromConservativeEmaStrategy } from "./strategies/conservative
 import { startEventLoopLagMonitor } from "./strategies/tools/testEventLoop";
 
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
 export class BotManager {
-    private bots = new Map<string, { stop: () => Promise<void> }>();
+    private bots = new Map<string, { stop: () => Promise<void>; restartIntervalId?: NodeJS.Timeout }>();
 
     async start(options: StartOptionsType ) {
         if(this.bots.size > 0) {
@@ -121,14 +123,32 @@ export class BotManager {
             }
         })
 
-        this.bots.set(botId, {
-            stop: async () => {
-                candlesWS.close();
-                accountStatsWS.close();
-                ordersWS.close();
-                accountWS.close();
-                this.bots.delete(botId);
+        const stopBot = async () => {
+            candlesWS.close();
+            accountStatsWS.close();
+            ordersWS.close();
+            accountWS.close();
+            const botEntry = this.bots.get(botId);
+            if (botEntry?.restartIntervalId) {
+                clearInterval(botEntry.restartIntervalId);
             }
+            this.bots.delete(botId);
+        };
+
+        let restartIntervalId: NodeJS.Timeout | undefined;
+        if (options.withRestart) {
+            restartIntervalId = setInterval(async () => {
+                console.log(`[BotManager] Restarting bot ${botId} (daily restart)...`);
+                await stopBot();
+                console.log(`[BotManager] Waiting 10 seconds before restart...`);
+                await new Promise((resolve) => setTimeout(resolve, 10_000));
+                await this.start({ ...options, withRestart: true });
+            }, ONE_DAY_MS);
+        }
+
+        this.bots.set(botId, {
+            stop: stopBot,
+            restartIntervalId,
         });
         return botId;
 
