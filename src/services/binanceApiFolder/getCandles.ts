@@ -10,7 +10,7 @@ export const getCandlesFromBinance = async (symbol: string = "ETH", interval: st
         } else if (symbol === 'LIT') {
             fixedSymbolString = 'LITUSDT'
         }
-        const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${fixedSymbolString}&interval=${interval}&limit=${limit}`);
+        const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${fixedSymbolString}&interval=${interval}&limit=${limit}`);
         const data = await response.json() as any[][];
         return data;
     } catch (error) {
