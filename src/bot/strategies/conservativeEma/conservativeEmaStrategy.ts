@@ -22,6 +22,8 @@ function calculateQtyAndNMargin(balance: number, riskPct: number, entryPrice: nu
     return { qty, nMargin, notional };
 }
 
+const DEBUG_OPEN_POSITION = process.env.DEBUG_OPEN_POSITION === "true";
+
 export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForConservativeStrategy): ActionsTypes[] => {
     let actions: ActionsTypes[] = [];
     const { emaShortPeriod,
@@ -47,7 +49,8 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
         beActive,
         trailingActive,
         entryPrice,
-        averageValumesMultiple
+        averageValumesMultiple,
+        timeframe
     } = options;
 
     const closes = candles.map(c => parseFloat(c[4]));
@@ -72,6 +75,29 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
     const price = closes[closes.length - 1];
     const valume = Number(candles[candles.length - 1][5]);
     const prevValume = Number(candles[candles.length - 2][5]);
+
+    const debugOpenPositionLog = (event: string, details: Record<string, any> = {}) => {
+        if (!DEBUG_OPEN_POSITION) return;
+
+        const lastCandle = candles[candles.length - 1];
+        const candleTime = lastCandle ? new Date(Number(lastCandle[0])).toISOString() : undefined;
+
+        console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            scope: "openPositionLogic",
+            symbol: symbol.name,
+            timeframe,
+            event,
+            emaShort,
+            emaLong,
+            prevEmaShort,
+            prevEmaLong,
+            price,
+            candleTime,
+            position,
+            ...details,
+        }));
+    };
 
 
 
@@ -156,54 +182,76 @@ export const getActionsFromConservativeEmaStrategy = (options: ParamsTypeForCons
 
 
     const openPositionLogic = () => {
-        if (position === 0) {
-            if (leverage !== optLeverage) {
-                actions.push({ type: 'updateLeverage', options: { marketIndex: symbol.index, leverage: optLeverage } });
-            }
-            if (beActive) {
-                actions.push({ type: 'beActive', options: { isActive: false } });
-            }
-            if (trailingActive) {
-                actions.push({ type: 'trailingActive', options: { isActive: false } });
-            }
-            // if (true) {
-            if (emaShort > emaLong && prevEmaShort < prevEmaLong) {
-                const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
-                const minLastFive = Math.min(...lastFiveClothes);
-                const priceChangePct = ((closes[closes.length - 1] - minLastFive) / minLastFive) * 100;
-                // if (true) {
-                if (priceChangePct >= atrRange) {
-                    if (averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < valume
-                        || averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < prevValume) {
-                        console.log('слабий валюм для відкриття позиції', { valume, prevValume, mustBe: averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) });
+        if (position !== 0) {
+            debugOpenPositionLog("позиція_вже_відкрита", { position });
+            return;
+        }
 
-                    }
-                    const shouldRiskPct = priceChangePct >= atrRange3 ? riskPct3 : priceChangePct >= atrRange2 ? riskPct2 : riskPct;
-                    const slPrice = closes[closes.length - 1] - atr * (atrPctforSL);
-                    openBuyOrder(slPrice, shouldRiskPct);
-                } else {
-                    console.log("Слабо виражений сигнал на продаж (Сила руху)", { atrRange, priceChangePct });
+        if (leverage !== optLeverage) {
+            actions.push({ type: 'updateLeverage', options: { marketIndex: symbol.index, leverage: optLeverage } });
+            debugOpenPositionLog("оновлення_плеча", { поточнеПлече: leverage, цільовеПлече: optLeverage });
+        }
+        if (beActive) {
+            actions.push({ type: 'beActive', options: { isActive: false } });
+            debugOpenPositionLog("скидання_be");
+        }
+        if (trailingActive) {
+            actions.push({ type: 'trailingActive', options: { isActive: false } });
+            debugOpenPositionLog("скидання_трейлінгу");
+        }
+
+        if (emaShort > emaLong && prevEmaShort < prevEmaLong) {
+            const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
+            const minLastFive = Math.min(...lastFiveClothes);
+            const priceChangePct = ((closes[closes.length - 1] - minLastFive) / minLastFive) * 100;
+
+            debugOpenPositionLog("перетин_ема_лонг", { priceChangePct, atrRange });
+
+            if (priceChangePct >= atrRange) {
+                const avgVolume = averageValumes[averageValumes.length - 1];
+                const mustBeVolume = avgVolume * Number(averageValumesMultiple);
+                if (mustBeVolume < valume || mustBeVolume < prevValume) {
+                    debugOpenPositionLog("слабкий_обʼєм_лонг", {
+                        valume,
+                        prevValume,
+                        avgVolume,
+                        mustBeVolume,
+                    });
                 }
-            } else if (emaShort < emaLong && prevEmaShort > prevEmaLong) {
-                const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
-                const maxLastFive = Math.max(...lastFiveClothes);
-                const priceChangePct = ((maxLastFive - closes[closes.length - 1]) / maxLastFive) * 100;
-                if (priceChangePct >= atrRange) {
-                        if (averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < valume
-                    || averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) < prevValume) {
-                        console.log('слабий валюм для відкриття позиції', { valume, prevValume, mustBe: averageValumes[averageValumes.length - 1] * Number(averageValumesMultiple) });
-                    }
-                    const shouldRiskPct = priceChangePct >= atrRange3 ? riskPct3 : priceChangePct >= atrRange2 ? riskPct2 : riskPct;
-                    const slPrice = closes[closes.length - 1] + atr * (atrPctforSL);
-                    openSellOrder(slPrice, shouldRiskPct);
-                } else {
-                    console.log("Слабо виражений сигнал на продаж ((Сила руху))", { atrRange, priceChangePct });
-                }
+                const shouldRiskPct = priceChangePct >= atrRange3 ? riskPct3 : priceChangePct >= atrRange2 ? riskPct2 : riskPct;
+                const slPrice = closes[closes.length - 1] - atr * (atrPctforSL);
+                debugOpenPositionLog("сигнал_на_відкриття_лонг", { shouldRiskPct, slPrice });
+                openBuyOrder(slPrice, shouldRiskPct);
             } else {
-                console.log("Нема пересічення EMA ліній, позиція не відкрита", { emaLong, emaShort, prevEmaLong, prevEmaShort });
+                debugOpenPositionLog("слабкий_рух_для_лонг", { atrRange, priceChangePct });
+            }
+        } else if (emaShort < emaLong && prevEmaShort > prevEmaLong) {
+            const lastFiveClothes = candles.slice(-5).map(c => parseFloat(c[4]));
+            const maxLastFive = Math.max(...lastFiveClothes);
+            const priceChangePct = ((maxLastFive - closes[closes.length - 1]) / maxLastFive) * 100;
+
+            debugOpenPositionLog("перетин_ема_шорт", { priceChangePct, atrRange });
+
+            if (priceChangePct >= atrRange) {
+                const avgVolume = averageValumes[averageValumes.length - 1];
+                const mustBeVolume = avgVolume * Number(averageValumesMultiple);
+                if (mustBeVolume < valume || mustBeVolume < prevValume) {
+                    debugOpenPositionLog("слабкий_обʼєм_шорт", {
+                        valume,
+                        prevValume,
+                        avgVolume,
+                        mustBeVolume,
+                    });
+                }
+                const shouldRiskPct = priceChangePct >= atrRange3 ? riskPct3 : priceChangePct >= atrRange2 ? riskPct2 : riskPct;
+                const slPrice = closes[closes.length - 1] + atr * (atrPctforSL);
+                debugOpenPositionLog("сигнал_на_відкриття_шорт", { shouldRiskPct, slPrice });
+                openSellOrder(slPrice, shouldRiskPct);
+            } else {
+                debugOpenPositionLog("слабкий_рух_для_шорт", { atrRange, priceChangePct });
             }
         } else {
-            console.log("Позиція вже відкрита", position);
+            debugOpenPositionLog("нема_перетину_ема");
         }
     }
 
