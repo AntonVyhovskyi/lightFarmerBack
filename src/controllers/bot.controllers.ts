@@ -86,3 +86,19 @@ export const getBotsController = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to get bots', details: error });
     }
 }
+
+export const getWSCacheController = async (req: Request, res: Response) => {
+    const botId = typeof req.params.botId === 'string' ? req.params.botId : req.params.botId?.[0];
+    if (!botId) {
+        return res.status(400).json({ error: 'botId is required' });
+    }
+    try {
+        const cache = botManager.getWSCache(botId);
+        if (!cache) {
+            return res.status(404).json({ error: 'Bot not found or cache not available', botId });
+        }
+        return res.status(200).json({ cache });
+    } catch (error) {
+        return res.status(500).json({ error: 'Failed to get WS cache', details: error });
+    }
+}

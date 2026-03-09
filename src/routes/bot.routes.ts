@@ -1,8 +1,9 @@
 import { Router } from "express";
-import { getBotsController, startBotController, stopBotController } from "../controllers/bot.controllers";
+import { getBotsController, getWSCacheController, startBotController, stopBotController } from "../controllers/bot.controllers";
 const router = Router();
 
 router.get("/", getBotsController);
+router.get("/cache/:botId", getWSCacheController);
 router.post("/start", startBotController);
 router.post("/stop", stopBotController);
 

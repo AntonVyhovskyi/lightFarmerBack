@@ -12,8 +12,19 @@ import { startEventLoopLagMonitor } from "./strategies/tools/testEventLoop";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
+export type WSCache = {
+    candles: string[][];
+    orders: OrderType[];
+    position: number;
+    balance: { total: number; avaliable: number };
+    currentLeverage: number;
+    trailingActive: boolean;
+    beActive: boolean;
+    entryPrice: string;
+};
+
 export class BotManager {
-    private bots = new Map<string, { stop: () => Promise<void>; restartIntervalId?: NodeJS.Timeout }>();
+    private bots = new Map<string, { stop: () => Promise<void>; restartIntervalId?: NodeJS.Timeout; cache?: WSCache }>();
 
     async start(options: StartOptionsType ) {
         if(this.bots.size > 0) {
@@ -23,22 +34,25 @@ export class BotManager {
         startEventLoopLagMonitor();
         const botId = `${options.symbol.name}-${options.timeframe}`;
         if (this.bots.has(botId)) return botId;
-        let candles: string[][] = [];
-        if (candles.length === 0) {
-            candles = await getCandlesFromBinance(options.symbol.name, options.timeframe, 500);
+
+        const cache: WSCache = {
+            candles: [],
+            orders: [],
+            position: 0,
+            balance: { total: 0, avaliable: 0 },
+            currentLeverage: 0,
+            trailingActive: false,
+            beActive: false,
+            entryPrice: "0",
+        };
+        if (cache.candles.length === 0) {
+            cache.candles = await getCandlesFromBinance(options.symbol.name, options.timeframe, 500);
         }
-        let orders: OrderType[] = [];
-        let position: number = 0;
-        let balance: { total: number; avaliable: number } = { total: 0, avaliable: 0 };
-        let currentLeverage: number = 0;
-        let trailingActive: boolean = false;
-        let beActive: boolean = false;
-        let entryPrice: string = "0";
 
         // change leverage on start --------------------------------------------------------------------------
         try {
             await excutor([{ type: 'updateLeverage', options: { marketIndex: options.symbol.index, leverage: options.leverage } }]);
-            currentLeverage = options.leverage;
+            cache.currentLeverage = options.leverage;
         } catch (error) {
             console.error("Error executing leverage change on bot start:", error);
         }
@@ -53,13 +67,13 @@ export class BotManager {
 
             const key = String(options.symbol.index); // '2'
             if (data.positions?.[key]) {
-                position = data.positions?.[key]?.position || 0;
+                cache.position = data.positions?.[key]?.position || 0;
                 if (data.positions?.[key]?.sign < 0) {
-                    position = -data.positions?.[key]?.position || 0;
+                    cache.position = -data.positions?.[key]?.position || 0;
                 }
             }
 
-            entryPrice = data.positions?.[key]?.avg_entry_price || 0;
+            cache.entryPrice = data.positions?.[key]?.avg_entry_price || 0;
 
 
 
@@ -74,7 +88,7 @@ export class BotManager {
         const ordersWS = await subscribeToAccountOrdersWS(Number(process.env.ACCOUNT_INDEX!), options.symbol.index, (data) => {
             const key = String(options.symbol.index); // '2'
             if (data.orders?.[key]) {
-                orders = data.orders?.[key] || [];
+                cache.orders = data.orders?.[key] || [];
             }
             ;
 
@@ -85,7 +99,7 @@ export class BotManager {
 
         const accountStatsWS = await subscribeToAccountStatsWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
             if (data.stats?.available_balance !== undefined) {
-                balance = {
+                cache.balance = {
                     total: Number(data.stats.portfolio_value || "0"),
                     avaliable: Number(data.stats.available_balance || "0"),
                 };
@@ -105,21 +119,21 @@ export class BotManager {
             console.log("--------=======-----------===========-------------");
 
 
-            candles.push(candle);
-            if (candles.length > 500) {
-                candles.shift();
+            cache.candles.push(candle);
+            if (cache.candles.length > 500) {
+                cache.candles.shift();
             }
             if (accountWS.readyState !== 1 || ordersWS.readyState !== 1 || accountStatsWS.readyState !== 1) {
                 console.log("One of the WS is not open yet. Skipping candle processing.");
                 return;
             }
-            const actions = await botEngine({ ...options, candles, position: Number(position), orders, balance, leverage: currentLeverage, optLeverage: options.leverage, beActive, trailingActive, entryPrice }, getActionsFromConservativeEmaStrategy);
+            const actions = await botEngine({ ...options, candles: cache.candles, position: Number(cache.position), orders: cache.orders, balance: cache.balance, leverage: cache.currentLeverage, optLeverage: options.leverage, beActive: cache.beActive, trailingActive: cache.trailingActive, entryPrice: cache.entryPrice }, getActionsFromConservativeEmaStrategy);
             for (const action of actions) {
-                if (action.type === 'updateLeverage' && action.options.leverage !== currentLeverage) {
-                    currentLeverage = action.options.leverage;
+                if (action.type === 'updateLeverage' && action.options.leverage !== cache.currentLeverage) {
+                    cache.currentLeverage = action.options.leverage;
                 }
-                if (action.type === 'trailingActive') trailingActive = action.options.isActive;
-                if (action.type === 'beActive') beActive = action.options.isActive; 
+                if (action.type === 'trailingActive') cache.trailingActive = action.options.isActive;
+                if (action.type === 'beActive') cache.beActive = action.options.isActive; 
             }
         })
 
@@ -149,6 +163,7 @@ export class BotManager {
         this.bots.set(botId, {
             stop: stopBot,
             restartIntervalId,
+            cache,
         });
         return botId;
 
@@ -168,6 +183,12 @@ export class BotManager {
 
     async getBots() {
         return Array.from(this.bots.keys());
+    }
+
+    getWSCache(botId: string): WSCache | null {
+        const bot = this.bots.get(botId);
+        if (!bot?.cache) return null;
+        return bot.cache;
     }
 }
 
