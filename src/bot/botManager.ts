@@ -26,8 +26,8 @@ export type WSCache = {
 export class BotManager {
     private bots = new Map<string, { stop: () => Promise<void>; restartIntervalId?: NodeJS.Timeout; cache?: WSCache }>();
 
-    async start(options: StartOptionsType ) {
-        if(this.bots.size > 0) {
+    async start(options: StartOptionsType) {
+        if (this.bots.size > 0) {
             console.log("A bot is already running. Only one bot can be run at a time.");
             throw new Error("A bot is already running. Only one bot can be run at a time.");
         }
@@ -118,8 +118,21 @@ export class BotManager {
         const candlesWS = subscribeBinanceCandlesWS(options.symbol.name, options.timeframe, async (candle) => {
             console.log("--------=======-----------===========-------------");
 
+            const last = cache.candles[cache.candles.length - 1];
 
-            cache.candles.push(candle);
+            if (!last) {
+                cache.candles.push(candle);
+            } else if (Number(last[0]) === Number(candle[0])) {
+                cache.candles[cache.candles.length - 1] = candle;
+            } else if (Number(candle[0]) > Number(last[0])) {
+                cache.candles.push(candle);
+            } else {
+                const idx = cache.candles.findIndex(c => Number(c[0]) === Number(candle[0]));
+                if (idx !== -1) {
+                    cache.candles[idx] = candle;
+                }
+            }
+
             if (cache.candles.length > 500) {
                 cache.candles.shift();
             }
@@ -133,7 +146,7 @@ export class BotManager {
                     cache.currentLeverage = action.options.leverage;
                 }
                 if (action.type === 'trailingActive') cache.trailingActive = action.options.isActive;
-                if (action.type === 'beActive') cache.beActive = action.options.isActive; 
+                if (action.type === 'beActive') cache.beActive = action.options.isActive;
             }
         })
 
@@ -169,7 +182,7 @@ export class BotManager {
 
     }
 
-    
+
 
     async stop(botId: string) {
         const bot = this.bots.get(botId);
