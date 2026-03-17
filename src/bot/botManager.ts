@@ -63,26 +63,34 @@ export class BotManager {
 
 
 
-        const accountWS = await subscribeToAccountAllWS(Number(process.env.ACCOUNT_INDEX!), (data) => {
+        const accountWS = await subscribeToAccountAllWS(
+            Number(process.env.ACCOUNT_INDEX!),
+            (data) => {
+                const key = String(options.symbol.index);
+                const positionData = data.positions?.[key];
 
-            const key = String(options.symbol.index); // '2'
-            if (data.positions?.[key]) {
-                cache.position = data.positions?.[key]?.position || 0;
-                if (data.positions?.[key]?.sign < 0) {
-                    cache.position = -data.positions?.[key]?.position || 0;
+                // Якщо це partial update без позиції по цьому інструменту — не чіпаємо кеш
+                if (!positionData) {
+                    return;
                 }
+
+                let nextPosition = Number(positionData.position || 0);
+                if (Number(positionData.sign) < 0) {
+                    nextPosition = -nextPosition;
+                }
+
+                cache.position = nextPosition;
+
+                if (nextPosition === 0) {
+                    cache.entryPrice = "0";
+                } else if (positionData.avg_entry_price !== undefined && positionData.avg_entry_price !== null) {
+                    cache.entryPrice = String(positionData.avg_entry_price);
+                }
+            },
+            (error) => {
+                console.error("Account WS error:", error);
             }
-
-            cache.entryPrice = data.positions?.[key]?.avg_entry_price || 0;
-
-
-
-
-
-
-        }, (error) => {
-            console.error("Account WS error:", error);
-        })
+        );
 
 
         const ordersWS = await subscribeToAccountOrdersWS(Number(process.env.ACCOUNT_INDEX!), options.symbol.index, (data) => {

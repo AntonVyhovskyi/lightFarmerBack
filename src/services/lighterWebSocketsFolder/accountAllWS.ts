@@ -101,7 +101,7 @@ export async function subscribeToAccountAllWS(accountIndex: number, onMessage: (
 
 // Example usage:
 // const ws = subscribeToAccountAllWS(277234, (data) => {
-//     // console.log('Received data:', data);
+//     console.log('Received data:', data);
 // }, (error) => {
 //     // console.error('WebSocket error:', error);
 // });
