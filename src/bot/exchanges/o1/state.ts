@@ -1,0 +1,33 @@
+import type { O1EnvConfig, O1State } from "./types";
+
+export const createInitialO1State = (config: O1EnvConfig): O1State => ({
+  candles: [],
+  orders: [],
+  positionSize: 0,
+  entryPrice: 0,
+  balanceTotal: 0,
+  balanceAvailable: 0,
+  lastPrice: 0,
+  beActive: false,
+  trailingActive: false,
+  lastSignalCandleTs: null,
+  lastOrderAt: null,
+  lastSyncAt: null,
+  pendingClientOrderIds: new Set<number>(),
+  ws: {
+    candleConnected: false,
+    accountConnected: false,
+    tradesConnected: false,
+    lastCandleUpdateAt: 0,
+    lastAccountUpdateAt: 0,
+    lastTradesUpdateAt: 0,
+    lastReconnectAttemptAt: 0,
+    reconnectCount: 0,
+  },
+  emergencyStop: config.emergencyStop,
+  dailyRealizedPnl: 0,
+  candlePreloaded: false,
+  preloadedCandleCount: 0,
+  accountWsHasPayload: false,
+  accountStateSource: "fetchInfo",
+});
