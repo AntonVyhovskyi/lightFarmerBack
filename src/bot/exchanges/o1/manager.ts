@@ -1,10 +1,13 @@
 import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
+import { Side } from "@n1xyz/nord-ts";
 import { preloadO1Candles } from "./candlePreload";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
 import { o1Error, o1Log, o1Warn } from "./logger";
 import { createInitialO1State } from "./state";
+import { evaluateEmaAtrTrail3mStrategy } from "./strategies/emaAtrTrail3mStrategy";
+import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
 import type { O1Diagnostics, O1EnvConfig, O1State } from "./types";
 import { createO1WsStreams, type O1WsHandle } from "./ws";
@@ -14,11 +17,14 @@ type O1BotEntry = {
   state: O1State;
   stop: () => Promise<void>;
   executor: O1Executor;
+  user: Awaited<ReturnType<typeof initO1Client>>["user"];
   pubkey: string;
   wsHandle?: O1WsHandle;
   reconnectTimer?: NodeJS.Timeout;
   heartbeatTimer?: NodeJS.Timeout;
   config: O1EnvConfig;
+  priceDecimals: number;
+  sizeDecimals: number;
 };
 
 export class O1BotManager {
@@ -36,6 +42,12 @@ export class O1BotManager {
     const executor = new O1Executor(user, config, state);
     await executor.syncAccount();
     this.syncStateFromUser(state, user, config.marketId, config.accountId!);
+
+    const info = await nord.getInfo();
+    const market = info.markets.find((entry) => entry.marketId === config.marketId || entry.symbol === config.symbol);
+    const priceDecimals = market?.priceDecimals ?? 2;
+    const sizeDecimals = market?.sizeDecimals ?? 4;
+    state.strategy.activeStrategyName = config.strategyName;
 
     const preloadedCandles = await preloadO1Candles(config);
     state.candles = preloadedCandles;
@@ -66,10 +78,16 @@ export class O1BotManager {
       state,
       onCandle: (candle) => {
         const ts = Number(candle[0]);
+        const previousLatestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
         upsertCandle(state.candles, candle, config.maxCandleCache);
         state.lastPrice = Number(candle[4]);
         o1Log("O1_CANDLE_UPDATE", "Candle cache updated.", { ts, size: state.candles.length, price: state.lastPrice });
-        void this.tick(botId);
+        const closedCandleTs = previousLatestTs !== null && ts > previousLatestTs ? previousLatestTs : null;
+        if (closedCandleTs !== null) {
+          void this.tick(botId, closedCandleTs);
+        } else {
+          void this.tick(botId);
+        }
       },
       onAccount: (payload) => {
         this.handleAccountUpdate(state, payload, config.marketId);
@@ -104,20 +122,37 @@ export class O1BotManager {
       state,
       stop,
       executor,
+      user,
       pubkey: user.publicKey.toBase58(),
       wsHandle,
       heartbeatTimer,
       config,
+      priceDecimals,
+      sizeDecimals,
     });
 
     return botId;
   }
 
-  private async tick(botId: string): Promise<void> {
+  private async tick(botId: string, closedCandleTs?: number): Promise<void> {
     const bot = this.bots.get(botId);
     if (!bot) return;
     const { state, executor, config } = bot;
     if (state.emergencyStop) return;
+
+    if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME) {
+      if (String(config.resolution) !== "3") {
+        o1Log("O1_STRATEGY_SKIP", "EMA ATR trail strategy requires O1_RESOLUTION=3.", {
+          resolution: config.resolution,
+        });
+        return;
+      }
+      if (closedCandleTs === undefined) return;
+      await this.runEmaAtrTrail3mStrategy(bot, closedCandleTs);
+      return;
+    }
+
+    if (closedCandleTs !== undefined) return;
     if (state.lastSignalCandleTs === Number(state.candles[state.candles.length - 1]?.[0])) return;
 
     const signal = getO1ConservativeEmaSignal({
@@ -126,10 +161,115 @@ export class O1BotManager {
       maxPositionSize: config.maxPositionSize,
     });
     state.lastSignalCandleTs = Number(state.candles[state.candles.length - 1]?.[0] ?? 0);
+    state.strategy.activeStrategyName = CONSERVATIVE_EMA_STRATEGY_NAME;
+    state.strategy.lastSignal = signal.type;
+    state.strategy.lastSignalReason = signal.type === "none" ? "no-conservative-ema-signal" : signal.type;
 
     if (signal.type === "openLong") await executor.openLong(signal.size);
     else if (signal.type === "openShort") await executor.openShort(signal.size);
     else if (signal.type === "closePosition") await executor.closePosition();
+  }
+
+  private async syncBotState(bot: O1BotEntry): Promise<void> {
+    await bot.executor.syncAccount();
+    this.syncStateFromUser(bot.state, bot.user, bot.config.marketId, bot.config.accountId!);
+  }
+
+  private async runEmaAtrTrail3mStrategy(bot: O1BotEntry, closedCandleTs: number): Promise<void> {
+    const { state, executor, config } = bot;
+    await this.syncBotState(bot);
+
+    const action = evaluateEmaAtrTrail3mStrategy({
+      state,
+      closedCandleTs,
+      marketId: config.marketId,
+      maxPositionSize: config.maxPositionSize,
+      priceDecimals: bot.priceDecimals,
+      sizeDecimals: bot.sizeDecimals,
+    });
+
+    if (action.type === "none") return;
+
+    if (action.type === "openLong" || action.type === "openShort") {
+      if (state.positionSize !== 0) {
+        o1Log("O1_STRATEGY_SKIP", "Open blocked because a position is already open.", {
+          positionSize: state.positionSize,
+          closedCandleTs,
+        });
+        return;
+      }
+
+      const openResult = action.type === "openLong"
+        ? await executor.openLong(action.size)
+        : await executor.openShort(action.size);
+      if (!openResult.ok) {
+        o1Error("O1_STRATEGY_ERROR", "Entry order failed.", { action, result: openResult });
+        return;
+      }
+
+      await this.syncBotState(bot);
+      if (state.positionSize === 0) {
+        o1Error("O1_STRATEGY_ERROR", "Entry reported success but position is still flat.", { action });
+        return;
+      }
+
+      const stopSide = action.type === "openLong" ? Side.Ask : Side.Bid;
+      const stopSpec = state.strategy.activeStopLossSpec;
+      if (!stopSpec) {
+        o1Error("O1_STRATEGY_ERROR", "Missing stop-loss spec after entry.", { action });
+        await executor.closePosition();
+        return;
+      }
+
+      if (config.dryRun) {
+        o1Log("O1_ORDER_DRY_RUN", "Dry-run hypothetical initial stop-loss.", stopSpec);
+      } else {
+        const stopResult = await executor.placeStopLoss(stopSpec.triggerPrice, stopSide, stopSpec.limitBaseSize);
+        if (!stopResult.ok) {
+          o1Error("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position.", {
+            action,
+            stopSpec,
+            result: stopResult,
+          });
+          await this.syncBotState(bot);
+          await executor.closePosition();
+          return;
+        }
+      }
+
+      state.trailingActive = false;
+      return;
+    }
+
+    if (action.type === "updateTrailStop") {
+      const currentSpec = state.strategy.activeStopLossSpec;
+      if (!currentSpec) {
+        o1Error("O1_STRATEGY_ERROR", "Trailing update requested without active stop-loss spec.", { action });
+        return;
+      }
+
+      const nextSpec = {
+        ...currentSpec,
+        triggerPrice: action.stopLoss,
+      };
+
+      if (config.dryRun) {
+        o1Log("O1_ORDER_DRY_RUN", "Dry-run hypothetical trailing stop-loss update.", {
+          previous: currentSpec,
+          next: nextSpec,
+        });
+        state.strategy.activeStopLossSpec = nextSpec;
+        return;
+      }
+
+      const updateResult = await executor.updateStopLoss(currentSpec, nextSpec);
+      if (!updateResult.ok) {
+        o1Error("O1_STRATEGY_ERROR", "Trailing stop-loss update failed.", { action, result: updateResult });
+        return;
+      }
+
+      state.strategy.activeStopLossSpec = nextSpec;
+    }
   }
 
   private handleAccountUpdate(state: O1State, payload: WebSocketAccountUpdate, marketId: number): void {
@@ -209,7 +349,7 @@ export class O1BotManager {
   async forceSync(botId: string): Promise<void> {
     const bot = this.bots.get(botId);
     if (!bot) throw new Error(`O1 bot ${botId} not found.`);
-    await bot.executor.syncAccount();
+    await this.syncBotState(bot);
   }
 
   setEmergencyStop(botId: string, enabled: boolean): void {
@@ -237,6 +377,7 @@ export class O1BotManager {
         accountId: config.accountId,
         riskPct: config.riskPct,
         defaultLeverage: config.defaultLeverage,
+        strategyName: config.strategyName,
       },
       initialized: { nord: true, user: true },
       user: { pubkey: bot.pubkey, accountId: config.accountId },
@@ -266,6 +407,7 @@ export class O1BotManager {
         pendingOrders: state.pendingClientOrderIds.size,
         cooldownMs: config.cooldownMs,
       },
+      strategy: state.strategy,
     };
   }
 }

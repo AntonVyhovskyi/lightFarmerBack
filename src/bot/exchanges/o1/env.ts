@@ -14,8 +14,8 @@ const asNum = (value: string | undefined, fallback: number): number => {
 const toResolution = (value: string | undefined): CandleResolution => {
   const fallback: CandleResolution = "1";
   if (!value) return fallback;
-  const allowed: CandleResolution[] = ["1", "5", "15", "30", "60", "4H", "1D", "1W", "1M"];
-  return (allowed.includes(value as CandleResolution) ? value : fallback) as CandleResolution;
+  const allowed = ["1", "3", "5", "15", "30", "60", "4H", "1D", "1W", "1M"];
+  return (allowed.includes(value) ? value : fallback) as CandleResolution;
 };
 
 export const readO1Env = (): O1EnvConfig => ({
@@ -31,6 +31,7 @@ export const readO1Env = (): O1EnvConfig => ({
   marketId: asNum(process.env.O1_MARKET_ID, 0),
   symbol: process.env.O1_SYMBOL ?? "BTCUSDC",
   resolution: toResolution(process.env.O1_RESOLUTION),
+  strategyName: process.env.O1_STRATEGY ?? "conservativeEma",
   riskPct: asNum(process.env.O1_RISK_PCT, 0.5),
   defaultLeverage: asNum(process.env.O1_DEFAULT_LEVERAGE, 1),
   maxPositionSize: asNum(process.env.O1_MAX_POSITION_SIZE, 10),

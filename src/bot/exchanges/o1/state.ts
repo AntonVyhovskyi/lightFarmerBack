@@ -1,4 +1,5 @@
 import type { O1EnvConfig, O1State } from "./types";
+import { createInitialO1StrategyDiagnostics } from "./strategies/types";
 
 export const createInitialO1State = (config: O1EnvConfig): O1State => ({
   candles: [],
@@ -30,4 +31,5 @@ export const createInitialO1State = (config: O1EnvConfig): O1State => ({
   preloadedCandleCount: 0,
   accountWsHasPayload: false,
   accountStateSource: "fetchInfo",
+  strategy: createInitialO1StrategyDiagnostics(),
 });

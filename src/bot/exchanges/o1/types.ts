@@ -1,4 +1,5 @@
 import type { CandleResolution, FillMode, Side, TriggerKind } from "@n1xyz/nord-ts";
+import type { O1StrategyDiagnostics } from "./strategies/types";
 
 export type O1Candle = [
   openTimeMs: string,
@@ -28,6 +29,7 @@ export type O1EnvConfig = {
   marketId: number;
   symbol: string;
   resolution: CandleResolution;
+  strategyName: string;
   riskPct: number;
   defaultLeverage: number;
   maxPositionSize: number;
@@ -99,6 +101,7 @@ export type O1State = {
   preloadedCandleCount: number;
   accountWsHasPayload: boolean;
   accountStateSource: "fetchInfo" | "websocket";
+  strategy: O1StrategyDiagnostics;
 };
 
 export type O1PlaceOrderRequest = {
@@ -155,6 +158,7 @@ export type O1Diagnostics = {
     symbol: string;
     resolution: CandleResolution;
     accountId?: number;
+    strategyName: string;
     riskPct: number;
     defaultLeverage: number;
   };
@@ -191,4 +195,5 @@ export type O1Diagnostics = {
     pendingOrders: number;
     cooldownMs: number;
   };
+  strategy: O1StrategyDiagnostics;
 };
