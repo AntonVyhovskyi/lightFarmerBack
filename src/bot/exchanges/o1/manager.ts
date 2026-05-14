@@ -1,6 +1,6 @@
 import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import { Side } from "@n1xyz/nord-ts";
-import { preloadO1Candles } from "./candlePreload";
+import { preloadO1Candles, rebuildAggregated3mCandles, usesAggregated3mCandles } from "./candlePreload";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
@@ -9,7 +9,7 @@ import { createInitialO1State } from "./state";
 import { evaluateEmaAtrTrail3mStrategy } from "./strategies/emaAtrTrail3mStrategy";
 import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
-import type { O1Diagnostics, O1EnvConfig, O1State } from "./types";
+import type { O1Candle, O1Diagnostics, O1EnvConfig, O1State } from "./types";
 import { createO1WsStreams, type O1WsHandle } from "./ws";
 
 type O1BotEntry = {
@@ -25,6 +25,8 @@ type O1BotEntry = {
   config: O1EnvConfig;
   priceDecimals: number;
   sizeDecimals: number;
+  usesAggregated3m: boolean;
+  oneMinuteCandles: O1Candle[];
 };
 
 export class O1BotManager {
@@ -48,6 +50,9 @@ export class O1BotManager {
     const priceDecimals = market?.priceDecimals ?? 2;
     const sizeDecimals = market?.sizeDecimals ?? 4;
     state.strategy.activeStrategyName = config.strategyName;
+
+    const usesAggregated3m = usesAggregated3mCandles(config.resolution);
+    const oneMinuteCandles: O1Candle[] = [];
 
     const preloadedCandles = await preloadO1Candles(config);
     state.candles = preloadedCandles;
@@ -76,7 +81,30 @@ export class O1BotManager {
       nord,
       config,
       state,
+      candleStreamResolution: usesAggregated3m ? "1" : config.resolution,
       onCandle: (candle) => {
+        if (usesAggregated3m) {
+          const previousLatestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+          upsertCandle(oneMinuteCandles, candle, config.maxCandleCache * 3 + 6);
+          state.candles = rebuildAggregated3mCandles(oneMinuteCandles, config.maxCandleCache);
+          state.lastPrice = Number(candle[4]);
+          const latestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+          o1Log("O1_CANDLE_UPDATE", "Aggregated 3m candle cache updated.", {
+            sourceTs: Number(candle[0]),
+            latestAggregatedTs: latestTs,
+            sourceSize: oneMinuteCandles.length,
+            aggregatedSize: state.candles.length,
+            price: state.lastPrice,
+          });
+          const closedCandleTs = previousLatestTs !== null && latestTs !== null && latestTs > previousLatestTs ? previousLatestTs : null;
+          if (closedCandleTs !== null) {
+            void this.tick(botId, closedCandleTs);
+          } else {
+            void this.tick(botId);
+          }
+          return;
+        }
+
         const ts = Number(candle[0]);
         const previousLatestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
         upsertCandle(state.candles, candle, config.maxCandleCache);
@@ -129,6 +157,8 @@ export class O1BotManager {
       config,
       priceDecimals,
       sizeDecimals,
+      usesAggregated3m,
+      oneMinuteCandles,
     });
 
     return botId;

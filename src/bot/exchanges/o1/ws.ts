@@ -1,4 +1,4 @@
-import type { Nord, NordWebSocketClient, WebSocketAccountUpdate, WebSocketCandleUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
+import type { CandleResolution, Nord, NordWebSocketClient, WebSocketAccountUpdate, WebSocketCandleUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import type { O1EnvConfig, O1State } from "./types";
 import { o1Error, o1Log, o1Warn } from "./logger";
 
@@ -29,6 +29,7 @@ export const createO1WsStreams = ({
   nord,
   config,
   state,
+  candleStreamResolution,
   onCandle,
   onAccount,
   onTrade,
@@ -37,6 +38,7 @@ export const createO1WsStreams = ({
   nord: Nord;
   config: O1EnvConfig;
   state: O1State;
+  candleStreamResolution?: CandleResolution;
   onCandle: (candle: O1State["candles"][number], raw: WebSocketCandleUpdate) => void;
   onAccount: (payload: WebSocketAccountUpdate) => void;
   onTrade: (payload: WebSocketTradeUpdate) => void;
@@ -60,12 +62,16 @@ export const createO1WsStreams = ({
   };
 
   const start = () => {
+    const streamResolution = candleStreamResolution ?? config.resolution;
     candleWs = nord.createWebSocketClient({
-      candles: [{ symbol: config.symbol, resolution: config.resolution }],
+      candles: [{ symbol: config.symbol, resolution: streamResolution }],
     });
     candleWs.on("connected", () => {
       state.ws.candleConnected = true;
-      o1Log("O1_WS_CANDLE_CONNECTED", "Candle stream connected.");
+      o1Log("O1_WS_CANDLE_CONNECTED", "Candle stream connected.", {
+        streamResolution,
+        effectiveResolution: config.resolution,
+      });
     });
     candleWs.on("candle", (payload) => {
       if (!payload || typeof payload !== "object") {
