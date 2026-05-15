@@ -1,7 +1,11 @@
 import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import { Side } from "@n1xyz/nord-ts";
-import { preloadO1Candles, rebuildAggregated3mCandles, usesAggregated3mCandles } from "./candlePreload";
-import { describeCandleAlignment, detectClosed3mBucketMs } from "./candleAggregation";
+import { preloadO1Candles, usesAggregated3mCandles } from "./candlePreload";
+import {
+  describeCandleAlignment,
+  detectClosed3mBucketMs,
+  mergeLive1mIntoEffective3mCache,
+} from "./candleAggregation";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
@@ -34,6 +38,7 @@ type O1BotEntry = {
   usesAggregated3m: boolean;
   oneMinuteCandles: O1Candle[];
   lastOneMinuteTs: number | null;
+  lastClosed3mTickTs: number | null;
 };
 
 export class O1BotManager {
@@ -63,13 +68,29 @@ export class O1BotManager {
     const usesAggregated3m = usesAggregated3mCandles(config.resolution);
     const oneMinuteCandles: O1Candle[] = [];
     let lastOneMinuteTs: number | null = null;
+    let lastClosed3mTickTs: number | null = null;
+    const live1mBufferMax = 12;
 
     const preloadedCandles = await preloadO1Candles(config);
-    state.candles = preloadedCandles;
+    state.candles = [...preloadedCandles];
     state.candlePreloaded = preloadedCandles.length > 0;
     state.preloadedCandleCount = preloadedCandles.length;
     if (preloadedCandles.length > 0) {
       state.lastPrice = Number(preloadedCandles[preloadedCandles.length - 1][4]);
+    }
+
+    if (usesAggregated3m) {
+      o1Log("O1_CANDLE_PRELOAD_AGGREGATED", "Preloaded 3m history loaded into effective cache.", {
+        preloaded3mCandleCount: state.preloadedCandleCount,
+        effective3mCandleCacheSize: state.candles.length,
+        latestPreloaded3mTs: state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null,
+      });
+
+      if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME && state.candles.length > 0) {
+        const lastPreloadedTs = Number(state.candles[state.candles.length - 1]![0]);
+        const snapshot = buildEmaAtrTrail3mTickSnapshot(state, lastPreloadedTs);
+        markStrategyReadyOnce(state, snapshot);
+      }
     }
 
     const reconnect = () => {
@@ -96,22 +117,29 @@ export class O1BotManager {
         if (usesAggregated3m) {
           const sourceTs = Number(candle[0]);
           const previousLatest1mTs = lastOneMinuteTs;
-          upsertCandle(oneMinuteCandles, candle, config.maxCandleCache * 3 + 6);
+          upsertCandle(oneMinuteCandles, candle, live1mBufferMax);
           lastOneMinuteTs = sourceTs;
-          state.candles = rebuildAggregated3mCandles(oneMinuteCandles, config.maxCandleCache);
+
+          const mergeResult = mergeLive1mIntoEffective3mCache(state.candles, oneMinuteCandles, config.maxCandleCache);
           state.lastPrice = Number(candle[4]);
-          const latestAggregatedTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+
           const closedCandleTs = detectClosed3mBucketMs(oneMinuteCandles, previousLatest1mTs, sourceTs);
-          o1Log("O1_CANDLE_UPDATE", "Aggregated 3m candle cache updated.", {
-            sourceTs,
-            latestAggregatedTs,
-            closedCandleTs,
-            sourceSize: oneMinuteCandles.length,
-            aggregatedSize: state.candles.length,
-            price: state.lastPrice,
+          const diagnostics = {
+            source1mBufferSize: oneMinuteCandles.length,
+            effective3mCandleCacheSize: state.candles.length,
+            preloaded3mCandleCount: state.preloadedCandleCount,
+            latestClosed3mCandleTs: closedCandleTs,
+            latestLive3mBucketTs: mergeResult.latestLive3mBucketTs,
+            mergedBucketKeys: mergeResult.mergedBucketKeys,
+            formingBucketBarCount: mergeResult.formingBucketBarCount,
             alignment: describeCandleAlignment(sourceTs),
-          });
-          if (closedCandleTs !== null) {
+          };
+
+          o1Log("O1_CANDLE_LIVE_AGGREGATED", "Merged live 1m into effective 3m cache.", diagnostics);
+
+          if (closedCandleTs !== null && closedCandleTs !== lastClosed3mTickTs) {
+            lastClosed3mTickTs = closedCandleTs;
+            o1Log("O1_CLOSED_3M_CANDLE", "Closed 3m candle detected.", diagnostics);
             void this.tick(botId, closedCandleTs);
           }
           return;
@@ -196,6 +224,7 @@ export class O1BotManager {
       usesAggregated3m,
       oneMinuteCandles,
       lastOneMinuteTs,
+      lastClosed3mTickTs,
     });
 
     return botId;
