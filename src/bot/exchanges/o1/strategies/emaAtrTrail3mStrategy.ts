@@ -1,6 +1,6 @@
 import { ATR, EMA } from "technicalindicators";
 import { Side, TriggerKind } from "@n1xyz/nord-ts";
-import { o1Error, o1Log } from "../logger";
+import { logDebug, logError, logInfo, roundMetric } from "../logger";
 import type { O1Candle, O1State, O1TriggerSpec } from "../types";
 import { EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./types";
 
@@ -111,7 +111,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (diagnostics.lastProcessedCandleTs === closedCandleTs) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "duplicate-closed-candle";
-    o1Log("O1_STRATEGY_SKIP", "Closed candle already processed.", { closedCandleTs });
+    logDebug("O1_STRATEGY_SKIP", "Closed candle already processed", { closedCandleTs });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
@@ -120,7 +120,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (closedCandles.length < minBars) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "insufficient-closed-candles";
-    o1Log("O1_STRATEGY_SKIP", "Not enough closed candles for indicators.", {
+    logDebug("O1_STRATEGY_SKIP", "Not enough closed candles for indicators", {
       closedCandles: closedCandles.length,
       required: minBars,
     });
@@ -142,7 +142,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (ema7Series.length < 2 || ema25Series.length < 2 || atrSeries.length < 1) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "indicator-warmup-incomplete";
-    o1Log("O1_STRATEGY_SKIP", "Indicator warmup incomplete.", {
+    logDebug("O1_STRATEGY_SKIP", "Indicator warmup incomplete", {
       ema7: ema7Series.length,
       ema25: ema25Series.length,
       atr: atrSeries.length,
@@ -162,7 +162,13 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   diagnostics.lastAtr = atr;
   diagnostics.lastProcessedCandleTs = closedCandleTs;
 
-  o1Log("O1_STRATEGY_ATR", "Computed ATR for closed candle.", { closedCandleTs, atr, close, ema7, ema25 });
+  logDebug("O1_INDICATORS", "Indicator snapshot", {
+    closedCandleTs,
+    atr: roundMetric(atr),
+    emaShort: roundMetric(ema7),
+    emaLong: roundMetric(ema25),
+    close: roundMetric(close),
+  });
 
   if (state.positionSize !== 0) {
     const entryPrice = state.entryPrice > 0 ? state.entryPrice : close;
@@ -173,7 +179,12 @@ export const evaluateEmaAtrTrail3mStrategy = ({
       diagnostics.trailingActive = true;
       diagnostics.lastSignal = "trail-active";
       diagnostics.lastSignalReason = "trailing-activated";
-      o1Log("O1_STRATEGY_TRAIL_ACTIVE", "Trailing stop activated.", { closedCandleTs, profitPct, entryPrice, close });
+      logInfo("O1_TRAIL", "Trailing stop activated", {
+        closedCandleTs,
+        profitPct: roundMetric(profitPct),
+        entryPrice: roundMetric(entryPrice),
+        close: roundMetric(close),
+      });
     }
 
     if (diagnostics.trailingActive) {
@@ -192,19 +203,17 @@ export const evaluateEmaAtrTrail3mStrategy = ({
         diagnostics.lastTrailingUpdateCandleTs = closedCandleTs;
         diagnostics.lastSignal = "trail-update";
         diagnostics.lastSignalReason = "trailing-stop-tightened";
-        o1Log("O1_STRATEGY_TRAIL_UPDATE", "Trailing stop moved.", {
-          closedCandleTs,
-          previousStopLoss: previousStop,
-          stopLoss: candidateStop,
-          profitPct,
+        logInfo("O1_TRAIL", "Trailing stop updated", {
+          oldSL: roundMetric(previousStop),
+          newSL: roundMetric(candidateStop),
+          profitPct: roundMetric(profitPct),
         });
         return { type: "updateTrailStop", stopLoss: candidateStop, previousStopLoss: previousStop ?? candidateStop };
       }
 
       diagnostics.lastSignal = "none";
       diagnostics.lastSignalReason = "trailing-stop-unchanged";
-      o1Log("O1_STRATEGY_SKIP", "Trailing stop candidate did not improve.", {
-        closedCandleTs,
+      logDebug("O1_STRATEGY_SKIP", "Trailing stop candidate did not improve", {
         candidateStop,
         previousStop,
       });
@@ -221,48 +230,44 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (!crossedLong && !crossedShort) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "no-ema-cross";
-    o1Log("O1_STRATEGY_SKIP", "No EMA cross on closed candle.", { closedCandleTs, ema7, ema25 });
+    logDebug("O1_STRATEGY_SKIP", "No EMA cross on closed candle", {
+      emaShort: roundMetric(ema7),
+      emaLong: roundMetric(ema25),
+    });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
   const side = crossedLong ? "long" : "short";
   const strengthPct = getStrengthPct(side, closes);
   diagnostics.lastStrengthPct = strengthPct;
-  o1Log("O1_STRATEGY_STRENGTH", "Computed movement strength.", {
-    closedCandleTs,
-    side,
-    strengthPct,
-    required: EMA_ATR_TRAIL_3M_PARAMS.strengthConfirmationPct,
-  });
 
   if (strengthPct === null || strengthPct < EMA_ATR_TRAIL_3M_PARAMS.strengthConfirmationPct) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "strength-below-threshold";
-    o1Log("O1_STRATEGY_SKIP", "Movement strength below threshold.", {
-      closedCandleTs,
+    logDebug("O1_STRATEGY_SKIP", "Movement strength below threshold", {
       side,
-      strengthPct,
+      strengthPct: roundMetric(strengthPct),
       required: EMA_ATR_TRAIL_3M_PARAMS.strengthConfirmationPct,
     });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
   const entryPrice = close;
+  const stopDistance = atr * EMA_ATR_TRAIL_3M_PARAMS.atrStopMultiplier;
   const size = calculatePositionSize(state.balanceTotal, entryPrice, atr, maxPositionSize, sizeDecimals);
-  o1Log("O1_STRATEGY_SIZE", "Computed position size.", {
-    balanceTotal: state.balanceTotal,
-    entryPrice,
-    atr,
-    stopDistance: atr * EMA_ATR_TRAIL_3M_PARAMS.atrStopMultiplier,
-    size,
+
+  logInfo("O1_RISK", "Position sizing calculated", {
+    balance: roundMetric(state.balanceTotal),
     riskPct: EMA_ATR_TRAIL_3M_PARAMS.riskPct,
-    leverage: EMA_ATR_TRAIL_3M_PARAMS.leverage,
+    stopDistance: roundMetric(stopDistance),
+    size: roundMetric(size),
+    atr: roundMetric(atr),
   });
 
   if (size <= 0) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "invalid-position-size";
-    o1Error("O1_STRATEGY_ERROR", "Computed position size is invalid.", { size, entryPrice, atr });
+    logError("O1_STRATEGY_ERROR", "Computed position size is invalid", { size, entryPrice, atr });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
@@ -281,9 +286,15 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     size
   );
 
-  o1Log("O1_STRATEGY_SIGNAL", "Entry signal detected.", { closedCandleTs, side, ema7, ema25, strengthPct, stopLoss, size });
-  o1Log("O1_STRATEGY_ENTRY", "Prepared entry action.", { side, entryPrice, size, stopLoss });
-  o1Log("O1_STRATEGY_INITIAL_SL", "Prepared initial stop-loss.", { stopLoss, size, side: crossedLong ? "ask" : "bid" });
+  const signalMessage = crossedLong ? "Long crossover confirmed" : "Short crossover confirmed";
+  logInfo("O1_SIGNAL", signalMessage, {
+    emaShort: roundMetric(ema7),
+    emaLong: roundMetric(ema25),
+    strengthPct: roundMetric(strengthPct),
+    stopLoss: roundMetric(stopLoss),
+    size: roundMetric(size),
+    side,
+  });
 
   if (crossedLong) {
     diagnostics.lastSignal = "open-long";

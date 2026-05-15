@@ -1,6 +1,12 @@
 import { FillMode, Side, TriggerKind, type NordUser } from "@n1xyz/nord-ts";
-import { normalizeO1Error } from "./errors";
-import { o1Error, o1Log } from "./logger";
+import { logNormalizedFailure, normalizeO1Error } from "./errors";
+import {
+  compactOrderRequest,
+  compactTriggerSpec,
+  logDebug,
+  logError,
+  logInfo,
+} from "./logger";
 import { ensureO1TradingSession } from "./session";
 import { validateClosePosition, validatePreTrade, validateSafetyGuardrails } from "./validators";
 import type { O1EnvConfig, O1Order, O1PlaceOrderRequest, O1Result, O1State, O1TriggerSpec } from "./types";
@@ -21,14 +27,16 @@ export class O1Executor {
   }
 
   private async place(req: O1PlaceOrderRequest): Promise<O1Result<{ actionId?: string; orderId?: string }>> {
-    o1Log("O1_ORDER_VALIDATE", "Validating order before send.", req);
+    const compact = compactOrderRequest(req);
+    logDebug("O1_ORDER", "Validating order", compact);
+
     const safety = validateSafetyGuardrails(this.config, this.state);
     if (!safety.ok) return safety;
     const validation = validatePreTrade(this.config, this.state, req);
     if (!validation.ok) return validation;
 
     if (this.config.dryRun) {
-      o1Log("O1_ORDER_DRY_RUN", "Dry-run mode blocked live order.", req);
+      logInfo("O1_ORDER", "Dry-run blocked live order", compact);
       return { ok: true, data: { actionId: "dry-run", orderId: "dry-run" } };
     }
 
@@ -37,7 +45,7 @@ export class O1Executor {
 
     try {
       if (req.clientOrderId) this.state.pendingClientOrderIds.add(req.clientOrderId);
-      o1Log("O1_ORDER_SENT", "Submitting order to Nord.", req);
+      logInfo("O1_ORDER", "Submitting order", compact);
       const result = await this.user.placeOrder({
         marketId: req.marketId,
         side: req.side,
@@ -51,14 +59,17 @@ export class O1Executor {
       });
       this.state.lastOrderAt = Date.now();
       if (req.clientOrderId) this.state.pendingClientOrderIds.delete(req.clientOrderId);
-      o1Log("O1_ORDER_RESULT", "Order submitted.", {
+      logInfo("O1_ORDER", "Order submitted", {
+        ...compact,
         actionId: result.actionId.toString(),
         orderId: result.orderId?.toString(),
       });
       return { ok: true, data: { actionId: result.actionId.toString(), orderId: result.orderId?.toString() } };
     } catch (err) {
       if (req.clientOrderId) this.state.pendingClientOrderIds.delete(req.clientOrderId);
-      return normalizeO1Error(err);
+      const normalized = normalizeO1Error(err);
+      logNormalizedFailure("O1_ORDER", "Order placement failed", normalized);
+      return normalized;
     }
   }
 
@@ -98,28 +109,31 @@ export class O1Executor {
       clientOrderId: Date.now(),
     };
 
-    o1Log("O1_CLOSE_VALIDATE", "Validating position close.", req);
+    const compact = compactOrderRequest(req);
     const validation = validateClosePosition(this.config, this.state, req);
     if (validation.ok === false) {
-      o1Error("O1_CLOSE_ERROR", "Position close validation failed.", { reason: validation.reason, req });
+      logError("O1_CLOSE", "Position close validation failed", {
+        reason: validation.reason,
+        ...compact,
+      });
       return validation;
     }
 
     if (this.config.dryRun) {
-      o1Log("O1_CLOSE_RESULT", "Dry-run mode blocked live close.", req);
+      logInfo("O1_CLOSE", "Dry-run blocked live close", compact);
       return { ok: true };
     }
 
     const sessionError = await this.ensureLiveSession();
     if (sessionError !== undefined) {
       if (sessionError.ok === false) {
-        o1Error("O1_CLOSE_ERROR", "Position close session preparation failed.", { reason: sessionError.reason, req });
+        logNormalizedFailure("O1_CLOSE", "Position close session preparation failed", sessionError);
       }
       return sessionError;
     }
 
     try {
-      o1Log("O1_CLOSE_SENT", "Submitting reduce-only close to Nord.", req);
+      logInfo("O1_CLOSE", "Submitting reduce-only close", compact);
       const result = await this.user.placeOrder({
         marketId: req.marketId,
         side: req.side,
@@ -130,16 +144,15 @@ export class O1Executor {
         clientOrderId: req.clientOrderId,
       });
       this.state.lastOrderAt = Date.now();
-      o1Log("O1_CLOSE_RESULT", "Position close submitted.", {
+      logInfo("O1_CLOSE", "Position close submitted", {
+        ...compact,
         actionId: result.actionId.toString(),
         orderId: result.orderId?.toString(),
       });
       return { ok: true, data: { actionId: result.actionId.toString(), orderId: result.orderId?.toString() } };
     } catch (err) {
       const normalized = normalizeO1Error(err);
-      if (normalized.ok === false) {
-        o1Error("O1_CLOSE_ERROR", "Position close failed.", { req, reason: normalized.reason });
-      }
+      logNormalizedFailure("O1_CLOSE", "Position close failed", normalized);
       return normalized;
     }
   }
@@ -150,6 +163,7 @@ export class O1Executor {
     if (sessionError) return sessionError;
     try {
       await this.user.cancelOrder(orderId, this.config.accountId);
+      logDebug("O1_ORDER", "Order cancelled", { orderId });
       return { ok: true };
     } catch (err) {
       return normalizeO1Error(err);
@@ -162,6 +176,7 @@ export class O1Executor {
     if (sessionError) return sessionError;
     try {
       await this.user.cancelOrderByClientId(clientOrderId, this.config.accountId);
+      logDebug("O1_ORDER", "Order cancelled by client id", { clientOrderId });
       return { ok: true };
     } catch (err) {
       return normalizeO1Error(err);
@@ -230,7 +245,6 @@ export class O1Executor {
   }
 
   async updateStopLoss(oldSpec: O1TriggerSpec, nextSpec: O1TriggerSpec): Promise<O1Result> {
-    // Trigger API is documented as experimental, so we aggressively log and resync.
     const remove = await this.removeTrigger(oldSpec);
     if (!remove.ok) return remove;
     return this.addTrigger(nextSpec);
@@ -268,43 +282,62 @@ export class O1Executor {
   }
 
   private async addTrigger(spec: O1TriggerSpec): Promise<O1Result> {
-    o1Log("O1_TRIGGER_ADD_SENT", "Submitting trigger (experimental API).", spec);
-    if (this.config.dryRun) return { ok: true };
+    const compact = compactTriggerSpec(spec);
+    const tag = spec.kind === TriggerKind.TakeProfit ? "O1_TP" : "O1_SL";
+    if (this.config.dryRun) {
+      logInfo(tag, "Dry-run blocked live trigger", compact);
+      return { ok: true };
+    }
+
     const sessionError = await this.ensureLiveSession();
     if (sessionError) return sessionError;
+
     try {
+      logInfo(tag, "Submitting trigger", compact);
       await this.user.addTrigger({ ...spec, accountId: this.config.accountId });
       this.rememberTrigger(spec);
-      o1Log("O1_TRIGGER_ADD_RESULT", "Trigger submitted.", spec);
+      logInfo(tag, "Trigger submitted", compact);
       return { ok: true };
     } catch (err) {
-      return normalizeO1Error(err);
+      const normalized = normalizeO1Error(err);
+      logNormalizedFailure(tag, "Trigger submission failed", normalized);
+      return normalized;
     }
   }
 
   private async removeTrigger(spec: O1TriggerSpec): Promise<O1Result> {
-    o1Log("O1_TRIGGER_REMOVE_SENT", "Removing trigger (experimental API).", spec);
-    if (this.config.dryRun) return { ok: true };
+    const compact = compactTriggerSpec(spec);
+    const tag = spec.kind === TriggerKind.TakeProfit ? "O1_TP" : "O1_SL";
+    if (this.config.dryRun) {
+      logInfo(tag, "Dry-run blocked live trigger removal", compact);
+      return { ok: true };
+    }
+
     const sessionError = await this.ensureLiveSession();
     if (sessionError) return sessionError;
+
     try {
+      logInfo(tag, "Removing trigger", compact);
       await this.user.removeTrigger({ ...spec, accountId: this.config.accountId });
       this.forgetTrigger(spec);
-      o1Log("O1_TRIGGER_REMOVE_RESULT", "Trigger removed.", spec);
+      logInfo(tag, "Trigger removed", compact);
       return { ok: true };
     } catch (err) {
-      return normalizeO1Error(err);
+      const normalized = normalizeO1Error(err);
+      logNormalizedFailure(tag, "Trigger removal failed", normalized);
+      return normalized;
     }
   }
 
   async syncAccount(): Promise<O1Result> {
-    o1Log("O1_SYNC", "Syncing account via fetchInfo.");
     try {
       await this.user.fetchInfo();
       this.state.lastSyncAt = Date.now();
       return { ok: true };
     } catch (err) {
-      return normalizeO1Error(err);
+      const normalized = normalizeO1Error(err);
+      logNormalizedFailure("O1_SYNC", "Account sync failed", normalized);
+      return normalized;
     }
   }
 

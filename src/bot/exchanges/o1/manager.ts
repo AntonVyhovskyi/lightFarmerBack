@@ -1,15 +1,20 @@
 import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import { Side } from "@n1xyz/nord-ts";
 import { preloadO1Candles, usesAggregated3mCandles } from "./candlePreload";
-import {
-  describeCandleAlignment,
-  detectClosed3mBucketMs,
-  mergeLive1mIntoEffective3mCache,
-} from "./candleAggregation";
+import { detectClosed3mBucketMs, mergeLive1mIntoEffective3mCache } from "./candleAggregation";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
-import { o1Error, o1Log, o1Warn } from "./logger";
+import {
+  compactCandleDiagnostics,
+  compactTriggerSpec,
+  logDebug,
+  logError,
+  logInfo,
+  logThrottle,
+  logWarn,
+} from "./logger";
+import { logSyncFromFetch, logSyncStaleFallback } from "./syncLogger";
 import { createInitialO1State } from "./state";
 import { evaluateEmaAtrTrail3mStrategy } from "./strategies/emaAtrTrail3mStrategy";
 import {
@@ -80,7 +85,7 @@ export class O1BotManager {
     }
 
     if (usesAggregated3m) {
-      o1Log("O1_CANDLE_PRELOAD_AGGREGATED", "Preloaded 3m history loaded into effective cache.", {
+      logInfo("O1_CANDLE_PRELOAD_AGGREGATED", "Preloaded 3m history loaded into effective cache", {
         preloaded3mCandleCount: state.preloadedCandleCount,
         effective3mCandleCacheSize: state.candles.length,
         latestPreloaded3mTs: state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null,
@@ -98,13 +103,13 @@ export class O1BotManager {
       if (!bot) return;
       const { reconnectCount } = bot.state.ws;
       if (reconnectCount >= config.reconnectAttemptsMax) {
-        o1Error("O1_WS_RECONNECT", "Reconnect attempts exceeded max limit.", { reconnectCount });
+        logError("O1_WS", "Reconnect attempts exceeded max limit", { reconnectCount });
         return;
       }
       bot.state.ws.reconnectCount += 1;
       bot.state.ws.lastReconnectAttemptAt = Date.now();
       const delay = Math.min(config.reconnectMaxMs, config.reconnectBaseMs * 2 ** reconnectCount);
-      o1Warn("O1_WS_RECONNECT", "Scheduling reconnect.", { delay, reconnectCount });
+      logWarn("O1_WS", "Scheduling reconnect", { delay, reconnectCount });
       bot.reconnectTimer = setTimeout(() => bot.wsHandle?.start(), delay);
     };
 
@@ -124,23 +129,26 @@ export class O1BotManager {
           state.lastPrice = Number(candle[4]);
 
           const closedCandleTs = detectClosed3mBucketMs(oneMinuteCandles, previousLatest1mTs, sourceTs);
-          const diagnostics = {
+          const diagnostics = compactCandleDiagnostics({
             source1mBufferSize: oneMinuteCandles.length,
             effective3mCandleCacheSize: state.candles.length,
             preloaded3mCandleCount: state.preloadedCandleCount,
             latestClosed3mCandleTs: closedCandleTs,
             latestLive3mBucketTs: mergeResult.latestLive3mBucketTs,
-            mergedBucketKeys: mergeResult.mergedBucketKeys,
             formingBucketBarCount: mergeResult.formingBucketBarCount,
-            alignment: describeCandleAlignment(sourceTs),
-          };
-
-          o1Log("O1_CANDLE_LIVE_AGGREGATED", "Merged live 1m into effective 3m cache.", diagnostics);
+          });
+          const cacheMismatch = state.candles.length < state.preloadedCandleCount;
 
           if (closedCandleTs !== null && closedCandleTs !== lastClosed3mTickTs) {
             lastClosed3mTickTs = closedCandleTs;
-            o1Log("O1_CLOSED_3M_CANDLE", "Closed 3m candle detected.", diagnostics);
+            logInfo("O1_CLOSED_3M_CANDLE", "Closed 3m candle detected", diagnostics);
             void this.tick(botId, closedCandleTs);
+          } else if (cacheMismatch) {
+            logWarn("O1_CANDLE_LIVE_AGGREGATED", "Effective 3m cache below preloaded count", diagnostics);
+          } else {
+            logThrottle("O1_CANDLE_LIVE_AGGREGATED", 30_000, () => {
+              logDebug("O1_CANDLE_LIVE_AGGREGATED", "Merged live 1m into effective 3m cache", diagnostics);
+            });
           }
           return;
         }
@@ -149,7 +157,7 @@ export class O1BotManager {
         const previousLatestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
         upsertCandle(state.candles, candle, config.maxCandleCache);
         state.lastPrice = Number(candle[4]);
-        o1Log("O1_CANDLE_UPDATE", "Candle cache updated.", { ts, size: state.candles.length, price: state.lastPrice });
+        logDebug("O1_CANDLE", "Candle cache updated", { ts, size: state.candles.length, price: state.lastPrice });
         const closedCandleTs = previousLatestTs !== null && ts > previousLatestTs ? previousLatestTs : null;
         if (closedCandleTs !== null) {
           void this.tick(botId, closedCandleTs);
@@ -173,27 +181,13 @@ export class O1BotManager {
       if (!wsStale) return;
 
       const sinceLastFallbackMs = now - state.ws.lastFallbackSyncAt;
-      if (sinceLastFallbackMs < fallbackSyncIntervalMs) {
-        o1Log("O1_SYNC", "Account stream stale but fallback sync throttled.", {
-          accountAgeMs,
-          wsStaleMs: config.wsStaleMs,
-          sinceLastFallbackMs,
-          fallbackSyncIntervalMs,
-          accountWsConnected: state.ws.accountConnected,
-          accountWsHasPayload: state.accountWsHasPayload,
-          lastAccountPayloadAt: state.ws.lastAccountPayloadAt,
-          lastAccountConnectAt: state.ws.lastAccountConnectAt,
-        });
-        return;
-      }
+      if (sinceLastFallbackMs < fallbackSyncIntervalMs) return;
 
-      o1Warn("O1_SYNC", "Account stream stale, running fallback sync.", {
+      logSyncStaleFallback({
         accountAgeMs,
         wsStaleMs: config.wsStaleMs,
         accountWsConnected: state.ws.accountConnected,
         accountWsHasPayload: state.accountWsHasPayload,
-        lastAccountPayloadAt: state.ws.lastAccountPayloadAt,
-        lastAccountConnectAt: state.ws.lastAccountConnectAt,
       });
       state.ws.lastFallbackSyncAt = now;
       await executor.syncAccount();
@@ -206,7 +200,7 @@ export class O1BotManager {
       if (this.bots.get(botId)?.reconnectTimer) clearTimeout(this.bots.get(botId)!.reconnectTimer);
       this.bots.delete(botId);
       resetO1Client();
-      o1Log("O1_STOP", "Stopped O1 bot.");
+      logInfo("O1_STOP", "Stopped O1 bot");
     };
 
     this.bots.set(botId, {
@@ -238,7 +232,7 @@ export class O1BotManager {
 
     if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME) {
       if (String(config.resolution) !== "3") {
-        o1Log("O1_STRATEGY_SKIP", "EMA ATR trail strategy requires O1_RESOLUTION=3.", {
+        logWarn("O1_STRATEGY_SKIP", "EMA ATR trail strategy requires O1_RESOLUTION=3", {
           resolution: config.resolution,
         });
         return;
@@ -289,7 +283,7 @@ export class O1BotManager {
     });
 
     if (action.type === "none") {
-      o1Log("O1_STRATEGY_SKIP", "No strategy action for closed candle.", {
+      logDebug("O1_STRATEGY_SKIP", "No strategy action for closed candle", {
         closedCandleTs,
         reason: action.reason,
       });
@@ -298,44 +292,55 @@ export class O1BotManager {
 
     if (action.type === "openLong" || action.type === "openShort") {
       if (state.positionSize !== 0) {
-        o1Log("O1_STRATEGY_SKIP", "Open blocked because a position is already open.", {
+        logDebug("O1_STRATEGY_SKIP", "Open blocked because a position is already open", {
           positionSize: state.positionSize,
           closedCandleTs,
         });
         return;
       }
 
+      logInfo("O1_ENTRY", "Executing entry", {
+        side: action.type === "openLong" ? "long" : "short",
+        size: action.size,
+        entryPrice: action.entryPrice,
+        stopLoss: action.stopLoss,
+        dryRun: config.dryRun,
+      });
+
       const openResult = action.type === "openLong"
         ? await executor.openLong(action.size)
         : await executor.openShort(action.size);
-      if (!openResult.ok) {
-        o1Error("O1_STRATEGY_ERROR", "Entry order failed.", { action, result: openResult });
+      if (openResult.ok === false) {
+        logError("O1_STRATEGY_ERROR", "Entry order failed", {
+          side: action.type,
+          reason: openResult.reason,
+        });
         return;
       }
 
       await this.syncBotState(bot);
       if (state.positionSize === 0) {
-        o1Error("O1_STRATEGY_ERROR", "Entry reported success but position is still flat.", { action });
+        logError("O1_STRATEGY_ERROR", "Entry reported success but position is still flat", {
+          side: action.type,
+          size: action.size,
+        });
         return;
       }
 
       const stopSide = action.type === "openLong" ? Side.Ask : Side.Bid;
       const stopSpec = state.strategy.activeStopLossSpec;
       if (!stopSpec) {
-        o1Error("O1_STRATEGY_ERROR", "Missing stop-loss spec after entry.", { action });
+        logError("O1_STRATEGY_ERROR", "Missing stop-loss spec after entry", { side: action.type });
         await executor.closePosition();
         return;
       }
 
-      if (config.dryRun) {
-        o1Log("O1_ORDER_DRY_RUN", "Dry-run hypothetical initial stop-loss.", stopSpec);
-      } else {
+      logInfo("O1_SL", "Placing initial stop-loss", compactTriggerSpec(stopSpec));
+      if (!config.dryRun) {
         const stopResult = await executor.placeStopLoss(stopSpec.triggerPrice, stopSide, stopSpec.limitBaseSize);
-        if (!stopResult.ok) {
-          o1Error("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position.", {
-            action,
-            stopSpec,
-            result: stopResult,
+        if (stopResult.ok === false) {
+          logError("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position", {
+            reason: stopResult.reason,
           });
           await this.syncBotState(bot);
           await executor.closePosition();
@@ -350,7 +355,7 @@ export class O1BotManager {
     if (action.type === "updateTrailStop") {
       const currentSpec = state.strategy.activeStopLossSpec;
       if (!currentSpec) {
-        o1Error("O1_STRATEGY_ERROR", "Trailing update requested without active stop-loss spec.", { action });
+        logError("O1_STRATEGY_ERROR", "Trailing update requested without active stop-loss spec");
         return;
       }
 
@@ -359,19 +364,20 @@ export class O1BotManager {
         triggerPrice: action.stopLoss,
       };
 
-      if (config.dryRun) {
-        o1Log("O1_ORDER_DRY_RUN", "Dry-run hypothetical trailing stop-loss update.", {
-          previous: currentSpec,
-          next: nextSpec,
-        });
-        state.strategy.activeStopLossSpec = nextSpec;
-        return;
-      }
+      logInfo("O1_TRAIL", "Updating trailing stop-loss", {
+        oldSL: action.previousStopLoss,
+        newSL: action.stopLoss,
+        dryRun: config.dryRun,
+      });
 
-      const updateResult = await executor.updateStopLoss(currentSpec, nextSpec);
-      if (!updateResult.ok) {
-        o1Error("O1_STRATEGY_ERROR", "Trailing stop-loss update failed.", { action, result: updateResult });
-        return;
+      if (!config.dryRun) {
+        const updateResult = await executor.updateStopLoss(currentSpec, nextSpec);
+        if (updateResult.ok === false) {
+          logError("O1_STRATEGY_ERROR", "Trailing stop-loss update failed", {
+            reason: updateResult.reason,
+          });
+          return;
+        }
       }
 
       state.strategy.activeStopLossSpec = nextSpec;
@@ -399,10 +405,9 @@ export class O1BotManager {
     const total = balances.reduce((sum, x) => sum + Number(x), 0);
     state.balanceTotal = total;
     state.balanceAvailable = total;
-    o1Log("O1_ACCOUNT_UPDATE", "Account update processed.", {
+    logDebug("O1_ACCOUNT", "Account update processed", {
       orders: state.orders.length,
       balanceTotal: state.balanceTotal,
-      receivedAt: now,
       updateId: payload.update_id,
     });
   }
@@ -439,11 +444,7 @@ export class O1BotManager {
       state.accountStateSource = "fetchInfo";
     }
     state.lastSyncAt = Date.now();
-    o1Log("O1_SYNC", "State synchronized from fetchInfo.", {
-      accountId,
-      positionSize: state.positionSize,
-      orders: state.orders.length,
-    });
+    logSyncFromFetch(accountId, state);
   }
 
   async stop(botId: string): Promise<void> {

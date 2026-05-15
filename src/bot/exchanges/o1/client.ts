@@ -2,7 +2,8 @@ import { Connection } from "@solana/web3.js";
 import { Nord, NordUser } from "@n1xyz/nord-ts";
 import { readO1Env, validateO1Env } from "./env";
 import { applyO1Uint8ArrayToHexPolyfill } from "./hexPolyfill";
-import { o1Log } from "./logger";
+import { logInfo } from "./logger";
+import { resetSyncLogger } from "./syncLogger";
 import type { O1EnvConfig } from "./types";
 
 let nordClient: Nord | null = null;
@@ -18,23 +19,27 @@ export const resetO1Client = (): void => {
   nordClient = null;
   nordUser = null;
   envCache = null;
+  resetSyncLogger();
 };
 
 export const initO1Client = async (): Promise<{ config: O1EnvConfig; nord: Nord; user: NordUser }> => {
   applyO1Uint8ArrayToHexPolyfill();
   const config = getO1Config();
   const missing = validateO1Env(config);
-  o1Log("O1_ENV_CHECK", "Validating environment for O1 exchange.", {
-    enabled: config.enabled,
-    dryRun: config.dryRun,
-    missing,
-  });
   if (missing.length > 0) {
     throw new Error(`Missing or invalid O1 env vars: ${missing.join(", ")}`);
   }
 
+  logInfo("O1_START", "Initializing O1 bot", {
+    symbol: config.symbol,
+    resolution: config.resolution,
+    strategy: config.strategyName,
+    dryRun: config.dryRun,
+    marketId: config.marketId,
+    accountId: config.accountId,
+  });
+
   if (!nordClient) {
-    o1Log("O1_INIT", "Initializing Nord client.");
     nordClient = await Nord.new({
       app: config.appKey,
       webServerUrl: config.webServerUrl,
@@ -44,7 +49,6 @@ export const initO1Client = async (): Promise<{ config: O1EnvConfig; nord: Nord;
   }
 
   if (!nordUser) {
-    o1Log("O1_INIT", "Initializing Nord user from private key.");
     nordUser = NordUser.fromPrivateKey(nordClient, config.privateKey);
     await nordUser.updateAccountId();
     await nordUser.fetchInfo();

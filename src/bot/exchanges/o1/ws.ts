@@ -1,6 +1,6 @@
 import type { CandleResolution, Nord, NordWebSocketClient, WebSocketAccountUpdate, WebSocketCandleUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
+import { logDebug, logError, logInfo, logWarn } from "./logger";
 import type { O1EnvConfig, O1State } from "./types";
-import { o1Error, o1Log, o1Warn } from "./logger";
 
 const toCandle = (payload: WebSocketCandleUpdate): O1State["candles"][number] => {
   const tsMs = Number(payload.t) * 1000;
@@ -53,11 +53,11 @@ export const createO1WsStreams = ({
       if (name === "candle") state.ws.candleConnected = false;
       if (name === "account") state.ws.accountConnected = false;
       if (name === "trades") state.ws.tradesConnected = false;
-      o1Warn("O1_WS_RECONNECT", `${name} socket disconnected, scheduling reconnect.`);
+      logWarn("O1_WS", `${name} socket disconnected`, { stream: name });
       onDisconnected();
     });
     ws.on("error", (error) => {
-      o1Error("O1_WS_RECONNECT", `${name} socket error.`, { error: String(error) });
+      logError("O1_WS", `${name} socket error`, error);
     });
   };
 
@@ -68,14 +68,14 @@ export const createO1WsStreams = ({
     });
     candleWs.on("connected", () => {
       state.ws.candleConnected = true;
-      o1Log("O1_WS_CANDLE_CONNECTED", "Candle stream connected.", {
+      logInfo("O1_WS", "Candle stream connected", {
         streamResolution,
         effectiveResolution: config.resolution,
       });
     });
     candleWs.on("candle", (payload) => {
       if (!payload || typeof payload !== "object") {
-        o1Warn("O1_CANDLE_UPDATE", "Malformed candle payload ignored.");
+        logWarn("O1_CANDLE", "Malformed candle payload ignored");
         return;
       }
       const candle = toCandle(payload);
@@ -89,8 +89,7 @@ export const createO1WsStreams = ({
       accounts: [config.accountId!],
     });
     if (config.debugWs) {
-      o1Log("O1_DEBUG_WS", "Account subscription prepared.", {
-        stream: `account@${config.accountId}`,
+      logDebug("O1_WS", "Account subscription prepared", {
         accountId: config.accountId,
         marketId: config.marketId,
         symbol: config.symbol,
@@ -101,25 +100,17 @@ export const createO1WsStreams = ({
       state.ws.accountConnected = true;
       state.ws.lastAccountConnectAt = now;
       state.ws.lastAccountUpdateAt = now;
-      o1Log("O1_WS_ACCOUNT_CONNECTED", "Account stream connected.", { connectedAt: now });
-      if (config.debugWs) {
-        o1Log("O1_DEBUG_WS", "Account websocket connected.", {
-          stream: `account@${config.accountId}`,
-        });
-      }
+      logInfo("O1_WS", "Account stream connected", { connectedAt: now });
     });
     accountWs.on("account", (payload) => {
       const now = Date.now();
       state.ws.lastAccountUpdateAt = now;
       state.ws.lastAccountPayloadAt = now;
-      o1Log("O1_WS_ACCOUNT_PAYLOAD", "Account websocket payload received.", {
-        receivedAt: now,
-        accountId: payload.account_id,
+      logDebug("O1_WS", "Account payload received", {
         updateId: payload.update_id,
-        placeCount: Object.keys(payload.places ?? {}).length,
-        cancelCount: Object.keys(payload.cancels ?? {}).length,
-        fillCount: Object.keys(payload.fills ?? {}).length,
-        balanceCount: Object.keys(payload.balances ?? {}).length,
+        places: Object.keys(payload.places ?? {}).length,
+        cancels: Object.keys(payload.cancels ?? {}).length,
+        fills: Object.keys(payload.fills ?? {}).length,
       });
       onAccount(payload);
     });

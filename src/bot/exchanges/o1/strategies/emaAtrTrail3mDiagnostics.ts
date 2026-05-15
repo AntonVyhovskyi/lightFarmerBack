@@ -1,5 +1,5 @@
 import { ATR, EMA } from "technicalindicators";
-import { o1Log } from "../logger";
+import { logDebug, logInfo, roundMetric } from "../logger";
 import type { O1Candle, O1State } from "../types";
 import { EMA_ATR_TRAIL_3M_PARAMS } from "./emaAtrTrail3mStrategy";
 
@@ -92,17 +92,27 @@ export const buildEmaAtrTrail3mTickSnapshot = (state: O1State, closedCandleTs: n
 };
 
 export const logEmaAtrTrail3mTick = (snapshot: EmaAtrTrail3mTickSnapshot): void => {
-  o1Log("O1_STRATEGY_TICK", "Strategy tick on closed candle.", snapshot);
+  logInfo("O1_STRATEGY_TICK", "Closed 3m candle evaluated", {
+    closedCandleTs: snapshot.closedCandleTs,
+    close: roundMetric(snapshot.candleClose),
+    emaShort: roundMetric(snapshot.emaShort),
+    emaLong: roundMetric(snapshot.emaLong),
+    atr: roundMetric(snapshot.atr),
+    crossover: snapshot.crossover,
+    strengthPct: roundMetric(snapshot.strengthPct),
+    positionSize: snapshot.positionSize,
+    trailingActive: snapshot.trailingActive,
+  });
 };
 
 export const markStrategyReadyOnce = (state: O1State, snapshot: EmaAtrTrail3mTickSnapshot): void => {
   if (!snapshot.indicatorsReady || state.strategy.indicatorsReadyLogged) return;
   state.strategy.indicatorsReadyLogged = true;
-  o1Log("O1_STRATEGY_READY", "Indicators warmed up; strategy is active.", {
+  logInfo("O1_STRATEGY_READY", "Indicators warmed up; strategy is active", {
     closedCandleCount: snapshot.closedCandleCount,
     requiredCandles: snapshot.requiredCandles,
-    emaShort: snapshot.emaShort,
-    emaLong: snapshot.emaLong,
-    atr: snapshot.atr,
+    emaShort: roundMetric(snapshot.emaShort),
+    emaLong: roundMetric(snapshot.emaLong),
+    atr: roundMetric(snapshot.atr),
   });
 };

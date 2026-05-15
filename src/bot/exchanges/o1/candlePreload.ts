@@ -1,7 +1,7 @@
 import type { CandleResolution } from "@n1xyz/nord-ts";
 import type { WebSocketCandleUpdate } from "@n1xyz/nord-ts";
 import { aggregate1mCandlesTo3m } from "./candleAggregation";
-import { o1Error, o1Log, o1Warn } from "./logger";
+import { logDebug, logError, logInfo, logWarn } from "./logger";
 import type { O1Candle, O1EnvConfig } from "./types";
 
 export const O1_AGGREGATED_TARGET_RESOLUTION = "3";
@@ -104,11 +104,10 @@ const trimCandles = (candles: O1Candle[], maxSize: number): O1Candle[] => {
 };
 
 const logPreloadFailure = (request: O1TvHistoryRequest, status: number, body: string): void => {
-  o1Error("O1_CANDLE_PRELOAD", "Historical candle preload request failed.", {
-    url: request.url,
-    params: request.params,
+  logError("O1_CANDLE_PRELOAD", "Historical candle preload request failed", {
+    resolution: request.params.resolution,
     status,
-    body,
+    body: body.slice(0, 200),
   });
 };
 
@@ -143,14 +142,10 @@ const loadHistoryCandles = async (
   to: number
 ): Promise<O1Candle[]> => {
   const request = buildTvHistoryRequest(config, resolution, countback, to);
-  o1Log("O1_CANDLE_PRELOAD", "Fetching historical candles.", {
+  logDebug("O1_CANDLE_PRELOAD", "Fetching historical candles", {
     symbol: config.symbol,
-    marketId: config.marketId,
     resolution,
     countback,
-    to,
-    url: request.url,
-    params: request.params,
   });
 
   const result = await fetchTvHistory(request);
@@ -161,22 +156,16 @@ const loadHistoryCandles = async (
 
   const payload = result.payload;
   if (!isHistoryOk(payload)) {
-    o1Error("O1_CANDLE_PRELOAD", "Historical candle preload returned no data.", {
-      url: request.url,
-      params: request.params,
+    logError("O1_CANDLE_PRELOAD", "Historical candle preload returned no data", {
+      resolution,
       status: result.status,
-      body: result.body,
     });
     throw new Error(`Candle preload returned no data for ${config.symbol}:${resolution}`);
   }
 
   const candles = historyToCandles(payload);
   if (candles.length === 0) {
-    o1Warn("O1_CANDLE_PRELOAD", "History endpoint returned zero candles.", {
-      resolution,
-      url: request.url,
-      params: request.params,
-    });
+    logWarn("O1_CANDLE_PRELOAD", "History endpoint returned zero candles", { resolution });
   }
 
   return trimCandles(candles, config.maxCandleCache);
@@ -186,14 +175,10 @@ const preloadAggregated3mFrom1m = async (config: O1EnvConfig, to: number): Promi
   const sourceCountback = Math.min(config.maxCandleCache * 3 + 6, config.maxCandleCache * 4);
   const oneMinuteCandles = await loadHistoryCandles(config, ONE_MINUTE_RESOLUTION, sourceCountback, to);
   const aggregated = trimCandles(aggregate1mCandlesTo3m(oneMinuteCandles), config.maxCandleCache);
-  o1Log("O1_CANDLE_PRELOAD_AGGREGATED", "Built 3m candles from 1m history.", {
-    symbol: config.symbol,
-    marketId: config.marketId,
-    targetResolution: O1_AGGREGATED_TARGET_RESOLUTION,
-    sourceResolution: ONE_MINUTE_RESOLUTION,
-    sourceCountback,
+  logInfo("O1_CANDLE_PRELOAD_AGGREGATED", "Built 3m candles from 1m history", {
     sourceCandleCount: oneMinuteCandles.length,
     aggregatedCandleCount: aggregated.length,
+    targetResolution: O1_AGGREGATED_TARGET_RESOLUTION,
   });
   return aggregated;
 };
@@ -204,9 +189,7 @@ export const preloadO1Candles = async (config: O1EnvConfig): Promise<O1Candle[]>
 
   if (!usesAggregated3mCandles(resolution)) {
     const candles = await loadHistoryCandles(config, resolution, config.maxCandleCache, to);
-    o1Log("O1_CANDLE_PRELOAD", "Historical candles loaded.", {
-      symbol: config.symbol,
-      marketId: config.marketId,
+    logInfo("O1_CANDLE_PRELOAD", "Historical candles loaded", {
       resolution,
       preloadedCandleCount: candles.length,
     });
@@ -217,9 +200,7 @@ export const preloadO1Candles = async (config: O1EnvConfig): Promise<O1Candle[]>
   const directResult = await fetchTvHistory(directRequest);
   if (directResult.ok && isHistoryOk(directResult.payload)) {
     const candles = trimCandles(historyToCandles(directResult.payload), config.maxCandleCache);
-    o1Log("O1_CANDLE_PRELOAD", "Historical candles loaded.", {
-      symbol: config.symbol,
-      marketId: config.marketId,
+    logInfo("O1_CANDLE_PRELOAD", "Historical candles loaded", {
       resolution,
       preloadedCandleCount: candles.length,
     });
@@ -228,19 +209,11 @@ export const preloadO1Candles = async (config: O1EnvConfig): Promise<O1Candle[]>
 
   if (!directResult.ok) {
     logPreloadFailure(directRequest, directResult.status, directResult.body);
-    o1Warn("O1_CANDLE_PRELOAD", "Direct 3m preload failed; falling back to 1m aggregation.", {
+    logWarn("O1_CANDLE_PRELOAD", "Direct 3m preload failed; falling back to 1m aggregation", {
       status: directResult.status,
-      body: directResult.body,
-      url: directRequest.url,
-      params: directRequest.params,
     });
   } else {
-    o1Warn("O1_CANDLE_PRELOAD", "Direct 3m preload returned no data; falling back to 1m aggregation.", {
-      status: directResult.status,
-      body: directResult.body,
-      url: directRequest.url,
-      params: directRequest.params,
-    });
+    logWarn("O1_CANDLE_PRELOAD", "Direct 3m preload returned no data; falling back to 1m aggregation");
   }
 
   return preloadAggregated3mFrom1m(config, to);
