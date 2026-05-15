@@ -17,6 +17,7 @@ export type O1StrategyDiagnostics = {
   lastTrailingUpdateCandleTs: number | null;
   lastProcessedCandleTs: number | null;
   activeStopLossSpec: O1TriggerSpec | null;
+  indicatorsReadyLogged: boolean;
 };
 
 export const createInitialO1StrategyDiagnostics = (): O1StrategyDiagnostics => ({
@@ -33,4 +34,5 @@ export const createInitialO1StrategyDiagnostics = (): O1StrategyDiagnostics => (
   lastTrailingUpdateCandleTs: null,
   lastProcessedCandleTs: null,
   activeStopLossSpec: null,
+  indicatorsReadyLogged: false,
 });

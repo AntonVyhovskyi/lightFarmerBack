@@ -54,6 +54,9 @@ export type O1WsStatuses = {
   lastTradesUpdateAt: number;
   lastReconnectAttemptAt: number;
   reconnectCount: number;
+  lastAccountPayloadAt: number;
+  lastAccountConnectAt: number;
+  lastFallbackSyncAt: number;
 };
 
 export type O1Order = {

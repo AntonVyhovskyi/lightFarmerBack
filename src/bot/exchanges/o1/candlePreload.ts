@@ -1,5 +1,6 @@
 import type { CandleResolution } from "@n1xyz/nord-ts";
 import type { WebSocketCandleUpdate } from "@n1xyz/nord-ts";
+import { aggregate1mCandlesTo3m } from "./candleAggregation";
 import { o1Error, o1Log, o1Warn } from "./logger";
 import type { O1Candle, O1EnvConfig } from "./types";
 
@@ -130,47 +131,9 @@ export const fetchTvHistory = async (request: O1TvHistoryRequest): Promise<O1TvH
   };
 };
 
-export const aggregate1mCandlesTo3m = (oneMinuteCandles: O1Candle[]): O1Candle[] => {
-  if (oneMinuteCandles.length === 0) return [];
-  const bucketMs = 3 * 60 * 1000;
-  const sorted = [...oneMinuteCandles].sort((left, right) => Number(left[0]) - Number(right[0]));
-  const grouped = new Map<number, O1Candle[]>();
-
-  for (const candle of sorted) {
-    const openMs = Number(candle[0]);
-    if (!Number.isFinite(openMs)) continue;
-    const bucketStart = Math.floor(openMs / bucketMs) * bucketMs;
-    const bucket = grouped.get(bucketStart) ?? [];
-    bucket.push(candle);
-    grouped.set(bucketStart, bucket);
-  }
-
-  return [...grouped.entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([bucketStart, bars]) => {
-      if (bars.length < 3) return null;
-      const ordered = bars.sort((left, right) => Number(left[0]) - Number(right[0]));
-      const open = ordered[0]![1];
-      const high = String(Math.max(...ordered.map((bar) => Number(bar[2]))));
-      const low = String(Math.min(...ordered.map((bar) => Number(bar[3]))));
-      const close = ordered[ordered.length - 1]![4];
-      const volume = String(ordered.reduce((sum, bar) => sum + Number(bar[5]), 0));
-      return [
-        String(bucketStart),
-        open,
-        high,
-        low,
-        close,
-        volume,
-        String(bucketStart),
-        volume,
-        "0",
-        "0",
-        "0",
-        "0",
-      ] as O1Candle;
-    })
-    .filter((candle): candle is O1Candle => candle !== null);
+export const rebuildAggregated3mCandles = (oneMinuteCandles: O1Candle[], maxSize: number): O1Candle[] => {
+  const aggregated = aggregate1mCandlesTo3m(oneMinuteCandles);
+  return trimCandles(aggregated, maxSize);
 };
 
 const loadHistoryCandles = async (
@@ -281,8 +244,4 @@ export const preloadO1Candles = async (config: O1EnvConfig): Promise<O1Candle[]>
   }
 
   return preloadAggregated3mFrom1m(config, to);
-};
-
-export const rebuildAggregated3mCandles = (oneMinuteCandles: O1Candle[], maxSize: number): O1Candle[] => {
-  return trimCandles(aggregate1mCandlesTo3m(oneMinuteCandles), maxSize);
 };

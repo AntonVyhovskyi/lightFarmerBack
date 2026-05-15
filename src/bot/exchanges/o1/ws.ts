@@ -97,8 +97,11 @@ export const createO1WsStreams = ({
       });
     }
     accountWs.on("connected", () => {
+      const now = Date.now();
       state.ws.accountConnected = true;
-      o1Log("O1_WS_ACCOUNT_CONNECTED", "Account stream connected.");
+      state.ws.lastAccountConnectAt = now;
+      state.ws.lastAccountUpdateAt = now;
+      o1Log("O1_WS_ACCOUNT_CONNECTED", "Account stream connected.", { connectedAt: now });
       if (config.debugWs) {
         o1Log("O1_DEBUG_WS", "Account websocket connected.", {
           stream: `account@${config.accountId}`,
@@ -106,17 +109,18 @@ export const createO1WsStreams = ({
       }
     });
     accountWs.on("account", (payload) => {
-      state.ws.lastAccountUpdateAt = Date.now();
-      if (config.debugWs) {
-        o1Log("O1_DEBUG_WS", "Account websocket payload received.", {
-          accountId: payload.account_id,
-          updateId: payload.update_id,
-          placeCount: Object.keys(payload.places ?? {}).length,
-          cancelCount: Object.keys(payload.cancels ?? {}).length,
-          fillCount: Object.keys(payload.fills ?? {}).length,
-          balanceCount: Object.keys(payload.balances ?? {}).length,
-        });
-      }
+      const now = Date.now();
+      state.ws.lastAccountUpdateAt = now;
+      state.ws.lastAccountPayloadAt = now;
+      o1Log("O1_WS_ACCOUNT_PAYLOAD", "Account websocket payload received.", {
+        receivedAt: now,
+        accountId: payload.account_id,
+        updateId: payload.update_id,
+        placeCount: Object.keys(payload.places ?? {}).length,
+        cancelCount: Object.keys(payload.cancels ?? {}).length,
+        fillCount: Object.keys(payload.fills ?? {}).length,
+        balanceCount: Object.keys(payload.balances ?? {}).length,
+      });
       onAccount(payload);
     });
     bindDisconnect("account", accountWs);

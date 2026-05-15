@@ -1,12 +1,18 @@
 import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import { Side } from "@n1xyz/nord-ts";
 import { preloadO1Candles, rebuildAggregated3mCandles, usesAggregated3mCandles } from "./candlePreload";
+import { describeCandleAlignment, detectClosed3mBucketMs } from "./candleAggregation";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
 import { o1Error, o1Log, o1Warn } from "./logger";
 import { createInitialO1State } from "./state";
 import { evaluateEmaAtrTrail3mStrategy } from "./strategies/emaAtrTrail3mStrategy";
+import {
+  buildEmaAtrTrail3mTickSnapshot,
+  logEmaAtrTrail3mTick,
+  markStrategyReadyOnce,
+} from "./strategies/emaAtrTrail3mDiagnostics";
 import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
 import type { O1Candle, O1Diagnostics, O1EnvConfig, O1State } from "./types";
@@ -27,6 +33,7 @@ type O1BotEntry = {
   sizeDecimals: number;
   usesAggregated3m: boolean;
   oneMinuteCandles: O1Candle[];
+  lastOneMinuteTs: number | null;
 };
 
 export class O1BotManager {
@@ -44,6 +51,8 @@ export class O1BotManager {
     const executor = new O1Executor(user, config, state);
     await executor.syncAccount();
     this.syncStateFromUser(state, user, config.marketId, config.accountId!);
+    state.ws.lastAccountUpdateAt = Date.now();
+    state.ws.lastAccountConnectAt = Date.now();
 
     const info = await nord.getInfo();
     const market = info.markets.find((entry) => entry.marketId === config.marketId || entry.symbol === config.symbol);
@@ -53,6 +62,7 @@ export class O1BotManager {
 
     const usesAggregated3m = usesAggregated3mCandles(config.resolution);
     const oneMinuteCandles: O1Candle[] = [];
+    let lastOneMinuteTs: number | null = null;
 
     const preloadedCandles = await preloadO1Candles(config);
     state.candles = preloadedCandles;
@@ -84,23 +94,25 @@ export class O1BotManager {
       candleStreamResolution: usesAggregated3m ? "1" : config.resolution,
       onCandle: (candle) => {
         if (usesAggregated3m) {
-          const previousLatestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+          const sourceTs = Number(candle[0]);
+          const previousLatest1mTs = lastOneMinuteTs;
           upsertCandle(oneMinuteCandles, candle, config.maxCandleCache * 3 + 6);
+          lastOneMinuteTs = sourceTs;
           state.candles = rebuildAggregated3mCandles(oneMinuteCandles, config.maxCandleCache);
           state.lastPrice = Number(candle[4]);
-          const latestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+          const latestAggregatedTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+          const closedCandleTs = detectClosed3mBucketMs(oneMinuteCandles, previousLatest1mTs, sourceTs);
           o1Log("O1_CANDLE_UPDATE", "Aggregated 3m candle cache updated.", {
-            sourceTs: Number(candle[0]),
-            latestAggregatedTs: latestTs,
+            sourceTs,
+            latestAggregatedTs,
+            closedCandleTs,
             sourceSize: oneMinuteCandles.length,
             aggregatedSize: state.candles.length,
             price: state.lastPrice,
+            alignment: describeCandleAlignment(sourceTs),
           });
-          const closedCandleTs = previousLatestTs !== null && latestTs !== null && latestTs > previousLatestTs ? previousLatestTs : null;
           if (closedCandleTs !== null) {
             void this.tick(botId, closedCandleTs);
-          } else {
-            void this.tick(botId);
           }
           return;
         }
@@ -113,8 +125,6 @@ export class O1BotManager {
         const closedCandleTs = previousLatestTs !== null && ts > previousLatestTs ? previousLatestTs : null;
         if (closedCandleTs !== null) {
           void this.tick(botId, closedCandleTs);
-        } else {
-          void this.tick(botId);
         }
       },
       onAccount: (payload) => {
@@ -127,13 +137,39 @@ export class O1BotManager {
     });
     wsHandle.start();
 
+    const fallbackSyncIntervalMs = Math.max(30_000, config.wsStaleMs);
     const heartbeatTimer = setInterval(async () => {
-      const wsStale = Date.now() - state.ws.lastAccountUpdateAt > config.wsStaleMs;
-      if (wsStale) {
-        o1Warn("O1_SYNC", "Account stream stale, running fallback sync.");
-        await executor.syncAccount();
-        this.syncStateFromUser(state, user, config.marketId, config.accountId!);
+      const now = Date.now();
+      const accountAgeMs = state.ws.lastAccountUpdateAt > 0 ? now - state.ws.lastAccountUpdateAt : Number.POSITIVE_INFINITY;
+      const wsStale = accountAgeMs > config.wsStaleMs;
+      if (!wsStale) return;
+
+      const sinceLastFallbackMs = now - state.ws.lastFallbackSyncAt;
+      if (sinceLastFallbackMs < fallbackSyncIntervalMs) {
+        o1Log("O1_SYNC", "Account stream stale but fallback sync throttled.", {
+          accountAgeMs,
+          wsStaleMs: config.wsStaleMs,
+          sinceLastFallbackMs,
+          fallbackSyncIntervalMs,
+          accountWsConnected: state.ws.accountConnected,
+          accountWsHasPayload: state.accountWsHasPayload,
+          lastAccountPayloadAt: state.ws.lastAccountPayloadAt,
+          lastAccountConnectAt: state.ws.lastAccountConnectAt,
+        });
+        return;
       }
+
+      o1Warn("O1_SYNC", "Account stream stale, running fallback sync.", {
+        accountAgeMs,
+        wsStaleMs: config.wsStaleMs,
+        accountWsConnected: state.ws.accountConnected,
+        accountWsHasPayload: state.accountWsHasPayload,
+        lastAccountPayloadAt: state.ws.lastAccountPayloadAt,
+        lastAccountConnectAt: state.ws.lastAccountConnectAt,
+      });
+      state.ws.lastFallbackSyncAt = now;
+      await executor.syncAccount();
+      this.syncStateFromUser(state, user, config.marketId, config.accountId!);
     }, Math.max(5000, Math.floor(config.wsStaleMs / 2)));
 
     const stop = async () => {
@@ -159,6 +195,7 @@ export class O1BotManager {
       sizeDecimals,
       usesAggregated3m,
       oneMinuteCandles,
+      lastOneMinuteTs,
     });
 
     return botId;
@@ -207,6 +244,10 @@ export class O1BotManager {
 
   private async runEmaAtrTrail3mStrategy(bot: O1BotEntry, closedCandleTs: number): Promise<void> {
     const { state, executor, config } = bot;
+    const tickSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs);
+    logEmaAtrTrail3mTick(tickSnapshot);
+    markStrategyReadyOnce(state, tickSnapshot);
+
     await this.syncBotState(bot);
 
     const action = evaluateEmaAtrTrail3mStrategy({
@@ -218,7 +259,13 @@ export class O1BotManager {
       sizeDecimals: bot.sizeDecimals,
     });
 
-    if (action.type === "none") return;
+    if (action.type === "none") {
+      o1Log("O1_STRATEGY_SKIP", "No strategy action for closed candle.", {
+        closedCandleTs,
+        reason: action.reason,
+      });
+      return;
+    }
 
     if (action.type === "openLong" || action.type === "openShort") {
       if (state.positionSize !== 0) {
@@ -303,9 +350,11 @@ export class O1BotManager {
   }
 
   private handleAccountUpdate(state: O1State, payload: WebSocketAccountUpdate, marketId: number): void {
+    const now = Date.now();
     state.accountWsHasPayload = true;
     state.accountStateSource = "websocket";
-    state.ws.lastAccountUpdateAt = Date.now();
+    state.ws.lastAccountUpdateAt = now;
+    state.ws.lastAccountPayloadAt = now;
     const orders = [...Object.entries(payload.places ?? {}), ...Object.entries(payload.reduced_orders ?? {})].map(([key, value]) => ({
       orderId: Number(key),
       marketId: Number(value.market_id),
@@ -324,6 +373,8 @@ export class O1BotManager {
     o1Log("O1_ACCOUNT_UPDATE", "Account update processed.", {
       orders: state.orders.length,
       balanceTotal: state.balanceTotal,
+      receivedAt: now,
+      updateId: payload.update_id,
     });
   }
 
