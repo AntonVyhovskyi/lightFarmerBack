@@ -1,7 +1,6 @@
 import { ATR, EMA } from "technicalindicators";
-import { logDebug, logInfo, roundMetric } from "../logger";
-import type { O1Candle, O1State } from "../types";
-import { EMA_ATR_TRAIL_3M_PARAMS } from "./emaAtrTrail3mStrategy";
+import { logInfo, roundMetric } from "../logger";
+import type { O1Candle, O1EmaAtrTrailStrategyParams, O1State } from "../types";
 
 export type EmaAtrTrail3mTickSnapshot = {
   latestCandleTs: number | null;
@@ -23,9 +22,13 @@ const getClosedCandles = (state: O1State, closedCandleTs: number): O1Candle[] =>
   return state.candles.filter((candle) => Number(candle[0]) <= closedCandleTs);
 };
 
-const getStrengthPct = (side: "long" | "short", closes: number[]): number | null => {
-  if (closes.length < EMA_ATR_TRAIL_3M_PARAMS.strengthLookback) return null;
-  const recent = closes.slice(-EMA_ATR_TRAIL_3M_PARAMS.strengthLookback);
+const getStrengthPct = (
+  side: "long" | "short",
+  closes: number[],
+  params: O1EmaAtrTrailStrategyParams
+): number | null => {
+  if (closes.length < params.strengthLookbackCandles) return null;
+  const recent = closes.slice(-params.strengthLookbackCandles);
   const currentClose = recent[recent.length - 1]!;
   if (!Number.isFinite(currentClose) || currentClose <= 0) return null;
   if (side === "long") {
@@ -36,10 +39,14 @@ const getStrengthPct = (side: "long" | "short", closes: number[]): number | null
   return ((currentClose - lowest) / currentClose) * 100;
 };
 
-export const buildEmaAtrTrail3mTickSnapshot = (state: O1State, closedCandleTs: number): EmaAtrTrail3mTickSnapshot => {
+export const buildEmaAtrTrail3mTickSnapshot = (
+  state: O1State,
+  closedCandleTs: number,
+  params: O1EmaAtrTrailStrategyParams
+): EmaAtrTrail3mTickSnapshot => {
   const latestCandleTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
   const closedCandles = getClosedCandles(state, closedCandleTs);
-  const requiredCandles = Math.max(EMA_ATR_TRAIL_3M_PARAMS.emaLongPeriod, EMA_ATR_TRAIL_3M_PARAMS.atrPeriod) + 2;
+  const requiredCandles = Math.max(params.emaLongPeriod, params.atrPeriod) + 2;
 
   const base: EmaAtrTrail3mTickSnapshot = {
     latestCandleTs,
@@ -62,9 +69,9 @@ export const buildEmaAtrTrail3mTickSnapshot = (state: O1State, closedCandleTs: n
   const closes = closedCandles.map((candle) => Number(candle[4]));
   const highs = closedCandles.map((candle) => Number(candle[2]));
   const lows = closedCandles.map((candle) => Number(candle[3]));
-  const ema7Series = EMA.calculate({ values: closes, period: EMA_ATR_TRAIL_3M_PARAMS.emaShortPeriod });
-  const ema25Series = EMA.calculate({ values: closes, period: EMA_ATR_TRAIL_3M_PARAMS.emaLongPeriod });
-  const atrSeries = ATR.calculate({ high: highs, low: lows, close: closes, period: EMA_ATR_TRAIL_3M_PARAMS.atrPeriod });
+  const ema7Series = EMA.calculate({ values: closes, period: params.emaShortPeriod });
+  const ema25Series = EMA.calculate({ values: closes, period: params.emaLongPeriod });
+  const atrSeries = ATR.calculate({ high: highs, low: lows, close: closes, period: params.atrPeriod });
 
   if (ema7Series.length < 2 || ema25Series.length < 2 || atrSeries.length < 1) return base;
 
@@ -78,7 +85,7 @@ export const buildEmaAtrTrail3mTickSnapshot = (state: O1State, closedCandleTs: n
   const crossedLong = prevEma7 <= prevEma25 && ema7 > ema25;
   const crossedShort = prevEma7 >= prevEma25 && ema7 < ema25;
   const crossover = crossedLong ? "long" : crossedShort ? "short" : "none";
-  const strengthPct = crossover === "none" ? null : getStrengthPct(crossover, closes);
+  const strengthPct = crossover === "none" ? null : getStrengthPct(crossover, closes, params);
 
   return {
     ...base,
@@ -91,8 +98,9 @@ export const buildEmaAtrTrail3mTickSnapshot = (state: O1State, closedCandleTs: n
   };
 };
 
-export const logEmaAtrTrail3mTick = (snapshot: EmaAtrTrail3mTickSnapshot): void => {
-  logInfo("O1_STRATEGY_TICK", "Closed 3m candle evaluated", {
+export const logEmaAtrTrail3mTick = (snapshot: EmaAtrTrail3mTickSnapshot, effectiveResolution: string): void => {
+  logInfo("O1_STRATEGY_TICK", "Closed candle evaluated", {
+    effectiveResolution,
     closedCandleTs: snapshot.closedCandleTs,
     close: roundMetric(snapshot.candleClose),
     emaShort: roundMetric(snapshot.emaShort),

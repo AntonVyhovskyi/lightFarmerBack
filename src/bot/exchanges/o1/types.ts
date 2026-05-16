@@ -16,6 +16,19 @@ export type O1Candle = [
   ignored: string
 ];
 
+export type O1EmaAtrTrailStrategyParams = {
+  emaShortPeriod: number;
+  emaLongPeriod: number;
+  atrPeriod: number;
+  strengthConfirmationPct: number;
+  riskPct: number;
+  atrStopMultiplier: number;
+  trailingStartPct: number;
+  trailingGapPct: number;
+  leverage: number;
+  strengthLookbackCandles: number;
+};
+
 export type O1EnvConfig = {
   enabled: boolean;
   dryRun: boolean;
@@ -32,6 +45,7 @@ export type O1EnvConfig = {
   strategyName: string;
   riskPct: number;
   defaultLeverage: number;
+  strategyParams: O1EmaAtrTrailStrategyParams;
   maxPositionSize: number;
   maxOrderNotional: number;
   maxCandleCache: number;
@@ -165,6 +179,13 @@ export type O1Diagnostics = {
     riskPct: number;
     defaultLeverage: number;
   };
+  candles: {
+    configuredResolution: string;
+    effectiveResolution: string;
+    candleMode: "direct" | "aggregated";
+    streamResolution: string;
+  };
+  strategyParams: O1EmaAtrTrailStrategyParams;
   initialized: {
     nord: boolean;
     user: boolean;
@@ -188,6 +209,7 @@ export type O1Diagnostics = {
     preloadedCandleCount: number;
   };
   ws: O1WsStatuses & {
+    accountAgeMs: number | null;
     accountWsConnected: boolean;
     accountWsHasPayload: boolean;
     accountStateSource: "fetchInfo" | "websocket";

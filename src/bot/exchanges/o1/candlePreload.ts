@@ -1,11 +1,14 @@
-import type { CandleResolution } from "@n1xyz/nord-ts";
 import type { WebSocketCandleUpdate } from "@n1xyz/nord-ts";
 import { aggregate1mCandlesTo3m } from "./candleAggregation";
+import {
+  O1_AGGREGATED_TARGET_RESOLUTION,
+  resolveO1CandleHandling,
+  usesAggregatedCandles,
+} from "./candleResolution";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
 import type { O1Candle, O1EnvConfig } from "./types";
 
-export const O1_AGGREGATED_TARGET_RESOLUTION = "3";
-const ONE_MINUTE_RESOLUTION: CandleResolution = "1";
+const ONE_MINUTE_RESOLUTION = "1";
 
 type TvHistoryOk = {
   s: "ok";
@@ -47,9 +50,7 @@ const isHistoryOk = (payload: unknown): payload is TvHistoryOk => {
     && Array.isArray(data.v);
 };
 
-export const usesAggregated3mCandles = (resolution: string | CandleResolution): boolean => {
-  return String(resolution) === O1_AGGREGATED_TARGET_RESOLUTION;
-};
+export { O1_AGGREGATED_TARGET_RESOLUTION, usesAggregated3mCandles } from "./candleResolution";
 
 export const buildTvHistoryRequest = (
   config: Pick<O1EnvConfig, "webServerUrl" | "symbol" | "marketId">,
@@ -171,50 +172,31 @@ const loadHistoryCandles = async (
   return trimCandles(candles, config.maxCandleCache);
 };
 
-const preloadAggregated3mFrom1m = async (config: O1EnvConfig, to: number): Promise<O1Candle[]> => {
+const preloadAggregatedFrom1m = async (config: O1EnvConfig, to: number): Promise<O1Candle[]> => {
   const sourceCountback = Math.min(config.maxCandleCache * 3 + 6, config.maxCandleCache * 4);
   const oneMinuteCandles = await loadHistoryCandles(config, ONE_MINUTE_RESOLUTION, sourceCountback, to);
   const aggregated = trimCandles(aggregate1mCandlesTo3m(oneMinuteCandles), config.maxCandleCache);
-  logInfo("O1_CANDLE_PRELOAD_AGGREGATED", "Built 3m candles from 1m history", {
+  logInfo("O1_CANDLE_PRELOAD_AGGREGATED", "Built aggregated candles from 1m history", {
     sourceCandleCount: oneMinuteCandles.length,
     aggregatedCandleCount: aggregated.length,
-    targetResolution: O1_AGGREGATED_TARGET_RESOLUTION,
+    effectiveResolution: O1_AGGREGATED_TARGET_RESOLUTION,
   });
   return aggregated;
 };
 
 export const preloadO1Candles = async (config: O1EnvConfig): Promise<O1Candle[]> => {
+  const handling = resolveO1CandleHandling(config);
   const to = Math.floor(Date.now() / 1000);
-  const resolution = String(config.resolution);
 
-  if (!usesAggregated3mCandles(resolution)) {
-    const candles = await loadHistoryCandles(config, resolution, config.maxCandleCache, to);
+  if (!usesAggregatedCandles(handling)) {
+    const candles = await loadHistoryCandles(config, handling.effectiveResolution, config.maxCandleCache, to);
     logInfo("O1_CANDLE_PRELOAD", "Historical candles loaded", {
-      resolution,
+      resolution: handling.effectiveResolution,
       preloadedCandleCount: candles.length,
+      candleMode: handling.mode,
     });
     return candles;
   }
 
-  const directRequest = buildTvHistoryRequest(config, resolution, config.maxCandleCache, to);
-  const directResult = await fetchTvHistory(directRequest);
-  if (directResult.ok && isHistoryOk(directResult.payload)) {
-    const candles = trimCandles(historyToCandles(directResult.payload), config.maxCandleCache);
-    logInfo("O1_CANDLE_PRELOAD", "Historical candles loaded", {
-      resolution,
-      preloadedCandleCount: candles.length,
-    });
-    return candles;
-  }
-
-  if (!directResult.ok) {
-    logPreloadFailure(directRequest, directResult.status, directResult.body);
-    logWarn("O1_CANDLE_PRELOAD", "Direct 3m preload failed; falling back to 1m aggregation", {
-      status: directResult.status,
-    });
-  } else {
-    logWarn("O1_CANDLE_PRELOAD", "Direct 3m preload returned no data; falling back to 1m aggregation");
-  }
-
-  return preloadAggregated3mFrom1m(config, to);
+  return preloadAggregatedFrom1m(config, to);
 };

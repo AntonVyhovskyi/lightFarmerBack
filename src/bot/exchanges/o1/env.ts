@@ -1,5 +1,6 @@
 import type { CandleResolution } from "@n1xyz/nord-ts";
-import type { O1EnvConfig } from "./types";
+import { O1_SUPPORTED_RESOLUTIONS } from "./candleResolution";
+import type { O1EnvConfig, O1EmaAtrTrailStrategyParams } from "./types";
 
 const asBool = (value: string | undefined, fallback = false): boolean => {
   if (!value) return fallback;
@@ -11,12 +12,27 @@ const asNum = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const toResolution = (value: string | undefined): CandleResolution => {
-  const fallback: CandleResolution = "1";
-  if (!value) return fallback;
-  const allowed = ["1", "3", "5", "15", "30", "60", "4H", "1D", "1W", "1M"];
-  return (allowed.includes(value) ? value : fallback) as CandleResolution;
+const asInt = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
 };
+
+const toResolution = (value: string | undefined): CandleResolution => {
+  return (value ?? "1") as CandleResolution;
+};
+
+const readStrategyParams = (): O1EmaAtrTrailStrategyParams => ({
+  emaShortPeriod: asInt(process.env.O1_EMA_SHORT_PERIOD, 7),
+  emaLongPeriod: asInt(process.env.O1_EMA_LONG_PERIOD, 25),
+  atrPeriod: asInt(process.env.O1_ATR_PERIOD, 14),
+  strengthConfirmationPct: asNum(process.env.O1_STRENGTH_CONFIRMATION_PCT, 0.5),
+  riskPct: asNum(process.env.O1_RISK_PCT, 1),
+  atrStopMultiplier: asNum(process.env.O1_ATR_STOP_MULTIPLIER, 2.5),
+  trailingStartPct: asNum(process.env.O1_TRAILING_START_PCT, 1),
+  trailingGapPct: asNum(process.env.O1_TRAILING_GAP_PCT, 0.5),
+  leverage: asNum(process.env.O1_DEFAULT_LEVERAGE, 7),
+  strengthLookbackCandles: asInt(process.env.O1_STRENGTH_LOOKBACK_CANDLES, 5),
+});
 
 export const readO1Env = (): O1EnvConfig => ({
   enabled: asBool(process.env.O1_ENABLED, false),
@@ -34,6 +50,7 @@ export const readO1Env = (): O1EnvConfig => ({
   strategyName: process.env.O1_STRATEGY ?? "conservativeEma",
   riskPct: asNum(process.env.O1_RISK_PCT, 0.5),
   defaultLeverage: asNum(process.env.O1_DEFAULT_LEVERAGE, 1),
+  strategyParams: readStrategyParams(),
   maxPositionSize: asNum(process.env.O1_MAX_POSITION_SIZE, 10),
   maxOrderNotional: asNum(process.env.O1_MAX_ORDER_NOTIONAL, 10000),
   maxCandleCache: asNum(process.env.O1_MAX_CANDLE_CACHE, 500),
@@ -47,6 +64,48 @@ export const readO1Env = (): O1EnvConfig => ({
   debugWs: asBool(process.env.O1_DEBUG_WS, false),
 });
 
+const isPositive = (value: number): boolean => Number.isFinite(value) && value > 0;
+
+export const validateO1StrategyParams = (params: O1EmaAtrTrailStrategyParams): string[] => {
+  const invalid: string[] = [];
+
+  if (!Number.isInteger(params.emaShortPeriod) || params.emaShortPeriod < 1) {
+    invalid.push("O1_EMA_SHORT_PERIOD must be a positive integer");
+  }
+  if (!Number.isInteger(params.emaLongPeriod) || params.emaLongPeriod < 1) {
+    invalid.push("O1_EMA_LONG_PERIOD must be a positive integer");
+  }
+  if (params.emaShortPeriod >= params.emaLongPeriod) {
+    invalid.push("O1_EMA_SHORT_PERIOD must be less than O1_EMA_LONG_PERIOD");
+  }
+  if (!Number.isInteger(params.atrPeriod) || params.atrPeriod < 1) {
+    invalid.push("O1_ATR_PERIOD must be a positive integer");
+  }
+  if (!isPositive(params.strengthConfirmationPct)) {
+    invalid.push("O1_STRENGTH_CONFIRMATION_PCT must be > 0");
+  }
+  if (!isPositive(params.riskPct) || params.riskPct > 100) {
+    invalid.push("O1_RISK_PCT must be > 0 and <= 100");
+  }
+  if (!isPositive(params.atrStopMultiplier)) {
+    invalid.push("O1_ATR_STOP_MULTIPLIER must be > 0");
+  }
+  if (!isPositive(params.trailingStartPct)) {
+    invalid.push("O1_TRAILING_START_PCT must be > 0");
+  }
+  if (!isPositive(params.trailingGapPct)) {
+    invalid.push("O1_TRAILING_GAP_PCT must be > 0");
+  }
+  if (!isPositive(params.leverage)) {
+    invalid.push("O1_DEFAULT_LEVERAGE must be > 0");
+  }
+  if (!Number.isInteger(params.strengthLookbackCandles) || params.strengthLookbackCandles < 1) {
+    invalid.push("O1_STRENGTH_LOOKBACK_CANDLES must be a positive integer");
+  }
+
+  return invalid;
+};
+
 export const validateO1Env = (config: O1EnvConfig): string[] => {
   const missing: string[] = [];
 
@@ -57,9 +116,17 @@ export const validateO1Env = (config: O1EnvConfig): string[] => {
   if (!config.wsUrl) missing.push("O1_WS_URL");
   if (!Number.isFinite(config.marketId) || config.marketId < 0) missing.push("O1_MARKET_ID");
   if (!config.symbol) missing.push("O1_SYMBOL");
+
+  const resolution = String(config.resolution);
+  if (!O1_SUPPORTED_RESOLUTIONS.includes(resolution as (typeof O1_SUPPORTED_RESOLUTIONS)[number])) {
+    missing.push(`O1_RESOLUTION (supported: ${O1_SUPPORTED_RESOLUTIONS.join(", ")})`);
+  }
+
   if (!Number.isFinite(config.riskPct) || config.riskPct <= 0 || config.riskPct > 100) missing.push("O1_RISK_PCT");
   if (!Number.isFinite(config.maxPositionSize) || config.maxPositionSize <= 0) missing.push("O1_MAX_POSITION_SIZE");
   if (!Number.isFinite(config.maxOrderNotional) || config.maxOrderNotional <= 0) missing.push("O1_MAX_ORDER_NOTIONAL");
+
+  missing.push(...validateO1StrategyParams(config.strategyParams));
 
   return missing;
 };

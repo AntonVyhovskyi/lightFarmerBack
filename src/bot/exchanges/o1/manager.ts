@@ -1,6 +1,12 @@
 import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import { Side } from "@n1xyz/nord-ts";
-import { preloadO1Candles, usesAggregated3mCandles } from "./candlePreload";
+import { preloadO1Candles } from "./candlePreload";
+import {
+  logO1CandleMode,
+  resolveO1CandleHandling,
+  usesAggregatedCandles,
+  type O1CandleHandling,
+} from "./candleResolution";
 import { detectClosed3mBucketMs, mergeLive1mIntoEffective3mCache } from "./candleAggregation";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
@@ -14,7 +20,12 @@ import {
   logThrottle,
   logWarn,
 } from "./logger";
-import { logSyncFromFetch, logSyncStaleFallback } from "./syncLogger";
+import {
+  logSyncFromFetch,
+  logSyncStaleFallbackFailed,
+  logSyncStaleFallbackIfNeeded,
+  markAccountStreamHealthy,
+} from "./syncLogger";
 import { createInitialO1State } from "./state";
 import { evaluateEmaAtrTrail3mStrategy } from "./strategies/emaAtrTrail3mStrategy";
 import {
@@ -40,10 +51,10 @@ type O1BotEntry = {
   config: O1EnvConfig;
   priceDecimals: number;
   sizeDecimals: number;
-  usesAggregated3m: boolean;
+  candleHandling: O1CandleHandling;
   oneMinuteCandles: O1Candle[];
   lastOneMinuteTs: number | null;
-  lastClosed3mTickTs: number | null;
+  lastClosedTickTs: number | null;
 };
 
 export class O1BotManager {
@@ -70,10 +81,12 @@ export class O1BotManager {
     const sizeDecimals = market?.sizeDecimals ?? 4;
     state.strategy.activeStrategyName = config.strategyName;
 
-    const usesAggregated3m = usesAggregated3mCandles(config.resolution);
+    const candleHandling = resolveO1CandleHandling(config);
+    logO1CandleMode(candleHandling);
+    const usesAggregation = usesAggregatedCandles(candleHandling);
     const oneMinuteCandles: O1Candle[] = [];
     let lastOneMinuteTs: number | null = null;
-    let lastClosed3mTickTs: number | null = null;
+    let lastClosedTickTs: number | null = null;
     const live1mBufferMax = 12;
 
     const preloadedCandles = await preloadO1Candles(config);
@@ -84,18 +97,17 @@ export class O1BotManager {
       state.lastPrice = Number(preloadedCandles[preloadedCandles.length - 1][4]);
     }
 
-    if (usesAggregated3m) {
-      logInfo("O1_CANDLE_PRELOAD_AGGREGATED", "Preloaded 3m history loaded into effective cache", {
-        preloaded3mCandleCount: state.preloadedCandleCount,
-        effective3mCandleCacheSize: state.candles.length,
-        latestPreloaded3mTs: state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null,
-      });
+    logInfo("O1_CANDLE_PRELOAD", "Effective candle cache ready", {
+      candleMode: candleHandling.mode,
+      effectiveResolution: candleHandling.effectiveResolution,
+      preloadedCandleCount: state.preloadedCandleCount,
+      effectiveCacheSize: state.candles.length,
+    });
 
-      if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME && state.candles.length > 0) {
-        const lastPreloadedTs = Number(state.candles[state.candles.length - 1]![0]);
-        const snapshot = buildEmaAtrTrail3mTickSnapshot(state, lastPreloadedTs);
-        markStrategyReadyOnce(state, snapshot);
-      }
+    if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME && state.candles.length > 0) {
+      const lastPreloadedTs = Number(state.candles[state.candles.length - 1]![0]);
+      const snapshot = buildEmaAtrTrail3mTickSnapshot(state, lastPreloadedTs, config.strategyParams);
+      markStrategyReadyOnce(state, snapshot);
     }
 
     const reconnect = () => {
@@ -117,9 +129,9 @@ export class O1BotManager {
       nord,
       config,
       state,
-      candleStreamResolution: usesAggregated3m ? "1" : config.resolution,
+      candleStreamResolution: candleHandling.streamResolution,
       onCandle: (candle) => {
-        if (usesAggregated3m) {
+        if (usesAggregation) {
           const sourceTs = Number(candle[0]);
           const previousLatest1mTs = lastOneMinuteTs;
           upsertCandle(oneMinuteCandles, candle, live1mBufferMax);
@@ -139,9 +151,12 @@ export class O1BotManager {
           });
           const cacheMismatch = state.candles.length < state.preloadedCandleCount;
 
-          if (closedCandleTs !== null && closedCandleTs !== lastClosed3mTickTs) {
-            lastClosed3mTickTs = closedCandleTs;
-            logInfo("O1_CLOSED_3M_CANDLE", "Closed 3m candle detected", diagnostics);
+          if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
+            lastClosedTickTs = closedCandleTs;
+            logInfo("O1_CLOSED_CANDLE", "Closed aggregated candle detected", {
+              ...diagnostics,
+              effectiveResolution: candleHandling.effectiveResolution,
+            });
             void this.tick(botId, closedCandleTs);
           } else if (cacheMismatch) {
             logWarn("O1_CANDLE_LIVE_AGGREGATED", "Effective 3m cache below preloaded count", diagnostics);
@@ -159,7 +174,13 @@ export class O1BotManager {
         state.lastPrice = Number(candle[4]);
         logDebug("O1_CANDLE", "Candle cache updated", { ts, size: state.candles.length, price: state.lastPrice });
         const closedCandleTs = previousLatestTs !== null && ts > previousLatestTs ? previousLatestTs : null;
-        if (closedCandleTs !== null) {
+        if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
+          lastClosedTickTs = closedCandleTs;
+          logInfo("O1_CLOSED_CANDLE", "Closed candle detected", {
+            closedCandleTs,
+            effectiveResolution: candleHandling.effectiveResolution,
+            cacheSize: state.candles.length,
+          });
           void this.tick(botId, closedCandleTs);
         }
       },
@@ -178,19 +199,27 @@ export class O1BotManager {
       const now = Date.now();
       const accountAgeMs = state.ws.lastAccountUpdateAt > 0 ? now - state.ws.lastAccountUpdateAt : Number.POSITIVE_INFINITY;
       const wsStale = accountAgeMs > config.wsStaleMs;
-      if (!wsStale) return;
+      if (!wsStale) {
+        markAccountStreamHealthy();
+        return;
+      }
 
       const sinceLastFallbackMs = now - state.ws.lastFallbackSyncAt;
       if (sinceLastFallbackMs < fallbackSyncIntervalMs) return;
 
-      logSyncStaleFallback({
+      const staleCtx = {
         accountAgeMs,
         wsStaleMs: config.wsStaleMs,
         accountWsConnected: state.ws.accountConnected,
         accountWsHasPayload: state.accountWsHasPayload,
-      });
+      };
+      logSyncStaleFallbackIfNeeded(staleCtx);
       state.ws.lastFallbackSyncAt = now;
-      await executor.syncAccount();
+      const syncResult = await executor.syncAccount();
+      if (syncResult.ok === false) {
+        logSyncStaleFallbackFailed(staleCtx, syncResult.reason);
+        return;
+      }
       this.syncStateFromUser(state, user, config.marketId, config.accountId!);
     }, Math.max(5000, Math.floor(config.wsStaleMs / 2)));
 
@@ -215,10 +244,10 @@ export class O1BotManager {
       config,
       priceDecimals,
       sizeDecimals,
-      usesAggregated3m,
+      candleHandling,
       oneMinuteCandles,
       lastOneMinuteTs,
-      lastClosed3mTickTs,
+      lastClosedTickTs,
     });
 
     return botId;
@@ -231,12 +260,6 @@ export class O1BotManager {
     if (state.emergencyStop) return;
 
     if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME) {
-      if (String(config.resolution) !== "3") {
-        logWarn("O1_STRATEGY_SKIP", "EMA ATR trail strategy requires O1_RESOLUTION=3", {
-          resolution: config.resolution,
-        });
-        return;
-      }
       if (closedCandleTs === undefined) return;
       await this.runEmaAtrTrail3mStrategy(bot, closedCandleTs);
       return;
@@ -266,9 +289,9 @@ export class O1BotManager {
   }
 
   private async runEmaAtrTrail3mStrategy(bot: O1BotEntry, closedCandleTs: number): Promise<void> {
-    const { state, executor, config } = bot;
-    const tickSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs);
-    logEmaAtrTrail3mTick(tickSnapshot);
+    const { state, executor, config, candleHandling } = bot;
+    const tickSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs, config.strategyParams);
+    logEmaAtrTrail3mTick(tickSnapshot, candleHandling.effectiveResolution);
     markStrategyReadyOnce(state, tickSnapshot);
 
     await this.syncBotState(bot);
@@ -280,6 +303,7 @@ export class O1BotManager {
       maxPositionSize: config.maxPositionSize,
       priceDecimals: bot.priceDecimals,
       sizeDecimals: bot.sizeDecimals,
+      params: config.strategyParams,
     });
 
     if (action.type === "none") {
@@ -473,7 +497,10 @@ export class O1BotManager {
     const bot = this.bots.get(botId);
     if (!bot) throw new Error(`O1 bot ${botId} not found.`);
     const state = bot.state;
-    const { config } = bot;
+    const { config, candleHandling } = bot;
+    const accountAgeMs = state.ws.lastAccountUpdateAt > 0
+      ? Date.now() - state.ws.lastAccountUpdateAt
+      : null;
     return {
       env: {
         enabled: config.enabled,
@@ -506,8 +533,16 @@ export class O1BotManager {
         candlePreloaded: state.candlePreloaded,
         preloadedCandleCount: state.preloadedCandleCount,
       },
+      candles: {
+        configuredResolution: candleHandling.configuredResolution,
+        effectiveResolution: candleHandling.effectiveResolution,
+        candleMode: candleHandling.mode,
+        streamResolution: String(candleHandling.streamResolution),
+      },
+      strategyParams: config.strategyParams,
       ws: {
         ...state.ws,
+        accountAgeMs,
         accountWsConnected: state.ws.accountConnected,
         accountWsHasPayload: state.accountWsHasPayload,
         accountStateSource: state.accountStateSource,

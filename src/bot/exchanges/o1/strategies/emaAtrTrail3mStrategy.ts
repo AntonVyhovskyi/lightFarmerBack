@@ -1,22 +1,8 @@
 import { ATR, EMA } from "technicalindicators";
 import { Side, TriggerKind } from "@n1xyz/nord-ts";
 import { logDebug, logError, logInfo, roundMetric } from "../logger";
-import type { O1Candle, O1State, O1TriggerSpec } from "../types";
+import type { O1Candle, O1EmaAtrTrailStrategyParams, O1State, O1TriggerSpec } from "../types";
 import { EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./types";
-
-export const EMA_ATR_TRAIL_3M_PARAMS = {
-  emaShortPeriod: 7,
-  emaLongPeriod: 25,
-  atrPeriod: 14,
-  strengthConfirmationPct: 0.5,
-  riskPct: 1,
-  atrStopMultiplier: 2.5,
-  trailingStartPct: 1,
-  trailingGapPct: 0.5,
-  leverage: 7,
-  timeframe: "3m",
-  strengthLookback: 5,
-} as const;
 
 export type EmaAtrTrail3mAction =
   | { type: "none"; reason: string }
@@ -53,6 +39,7 @@ export type EmaAtrTrail3mInput = {
   maxPositionSize: number;
   priceDecimals: number;
   sizeDecimals: number;
+  params: O1EmaAtrTrailStrategyParams;
 };
 
 const roundTo = (value: number, decimals: number): number => {
@@ -66,9 +53,13 @@ const getClosedCandles = (state: O1State, closedCandleTs: number): O1Candle[] =>
 
 const getCloses = (candles: O1Candle[]): number[] => candles.map((candle) => Number(candle[4]));
 
-const getStrengthPct = (side: "long" | "short", closes: number[]): number | null => {
-  if (closes.length < EMA_ATR_TRAIL_3M_PARAMS.strengthLookback) return null;
-  const recent = closes.slice(-EMA_ATR_TRAIL_3M_PARAMS.strengthLookback);
+const getStrengthPct = (
+  side: "long" | "short",
+  closes: number[],
+  params: O1EmaAtrTrailStrategyParams
+): number | null => {
+  if (closes.length < params.strengthLookbackCandles) return null;
+  const recent = closes.slice(-params.strengthLookbackCandles);
   const currentClose = recent[recent.length - 1]!;
   if (!Number.isFinite(currentClose) || currentClose <= 0) return null;
   if (side === "long") {
@@ -79,12 +70,19 @@ const getStrengthPct = (side: "long" | "short", closes: number[]): number | null
   return ((currentClose - lowest) / currentClose) * 100;
 };
 
-const calculatePositionSize = (balance: number, entryPrice: number, atr: number, maxPositionSize: number, sizeDecimals: number): number => {
-  const stopDistance = atr * EMA_ATR_TRAIL_3M_PARAMS.atrStopMultiplier;
+const calculatePositionSize = (
+  balance: number,
+  entryPrice: number,
+  atr: number,
+  maxPositionSize: number,
+  sizeDecimals: number,
+  params: O1EmaAtrTrailStrategyParams
+): number => {
+  const stopDistance = atr * params.atrStopMultiplier;
   if (!Number.isFinite(stopDistance) || stopDistance <= 0 || entryPrice <= 0) return 0;
-  const riskBudget = balance * (EMA_ATR_TRAIL_3M_PARAMS.riskPct / 100);
+  const riskBudget = balance * (params.riskPct / 100);
   const sizeByRisk = riskBudget / stopDistance;
-  const maxSizeByLeverage = (balance * EMA_ATR_TRAIL_3M_PARAMS.leverage) / entryPrice;
+  const maxSizeByLeverage = (balance * params.leverage) / entryPrice;
   const rawSize = Math.min(sizeByRisk, maxSizeByLeverage, maxPositionSize);
   return roundTo(rawSize, sizeDecimals);
 };
@@ -104,6 +102,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   maxPositionSize,
   priceDecimals,
   sizeDecimals,
+  params,
 }: EmaAtrTrail3mInput): EmaAtrTrail3mAction => {
   const diagnostics = state.strategy;
   diagnostics.activeStrategyName = EMA_ATR_TRAIL_3M_STRATEGY_NAME;
@@ -116,7 +115,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   }
 
   const closedCandles = getClosedCandles(state, closedCandleTs);
-  const minBars = Math.max(EMA_ATR_TRAIL_3M_PARAMS.emaLongPeriod, EMA_ATR_TRAIL_3M_PARAMS.atrPeriod) + 2;
+  const minBars = Math.max(params.emaLongPeriod, params.atrPeriod) + 2;
   if (closedCandles.length < minBars) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "insufficient-closed-candles";
@@ -130,13 +129,13 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   const closes = getCloses(closedCandles);
   const highs = closedCandles.map((candle) => Number(candle[2]));
   const lows = closedCandles.map((candle) => Number(candle[3]));
-  const ema7Series = EMA.calculate({ values: closes, period: EMA_ATR_TRAIL_3M_PARAMS.emaShortPeriod });
-  const ema25Series = EMA.calculate({ values: closes, period: EMA_ATR_TRAIL_3M_PARAMS.emaLongPeriod });
+  const ema7Series = EMA.calculate({ values: closes, period: params.emaShortPeriod });
+  const ema25Series = EMA.calculate({ values: closes, period: params.emaLongPeriod });
   const atrSeries = ATR.calculate({
     high: highs,
     low: lows,
     close: closes,
-    period: EMA_ATR_TRAIL_3M_PARAMS.atrPeriod,
+    period: params.atrPeriod,
   });
 
   if (ema7Series.length < 2 || ema25Series.length < 2 || atrSeries.length < 1) {
@@ -175,7 +174,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     const isLong = state.positionSize > 0;
     const profitPct = isLong ? ((close - entryPrice) / entryPrice) * 100 : ((entryPrice - close) / entryPrice) * 100;
 
-    if (!diagnostics.trailingActive && profitPct >= EMA_ATR_TRAIL_3M_PARAMS.trailingStartPct) {
+    if (!diagnostics.trailingActive && profitPct >= params.trailingStartPct) {
       diagnostics.trailingActive = true;
       diagnostics.lastSignal = "trail-active";
       diagnostics.lastSignalReason = "trailing-activated";
@@ -189,8 +188,8 @@ export const evaluateEmaAtrTrail3mStrategy = ({
 
     if (diagnostics.trailingActive) {
       const candidateStop = isLong
-        ? roundTo(close * (1 - EMA_ATR_TRAIL_3M_PARAMS.trailingGapPct / 100), priceDecimals)
-        : roundTo(close * (1 + EMA_ATR_TRAIL_3M_PARAMS.trailingGapPct / 100), priceDecimals);
+        ? roundTo(close * (1 - params.trailingGapPct / 100), priceDecimals)
+        : roundTo(close * (1 + params.trailingGapPct / 100), priceDecimals);
       const previousStop = diagnostics.currentStopLoss;
       const improves = previousStop === null
         ? true
@@ -238,27 +237,27 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   }
 
   const side = crossedLong ? "long" : "short";
-  const strengthPct = getStrengthPct(side, closes);
+  const strengthPct = getStrengthPct(side, closes, params);
   diagnostics.lastStrengthPct = strengthPct;
 
-  if (strengthPct === null || strengthPct < EMA_ATR_TRAIL_3M_PARAMS.strengthConfirmationPct) {
+  if (strengthPct === null || strengthPct < params.strengthConfirmationPct) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "strength-below-threshold";
     logDebug("O1_STRATEGY_SKIP", "Movement strength below threshold", {
       side,
       strengthPct: roundMetric(strengthPct),
-      required: EMA_ATR_TRAIL_3M_PARAMS.strengthConfirmationPct,
+      required: params.strengthConfirmationPct,
     });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
   const entryPrice = close;
-  const stopDistance = atr * EMA_ATR_TRAIL_3M_PARAMS.atrStopMultiplier;
-  const size = calculatePositionSize(state.balanceTotal, entryPrice, atr, maxPositionSize, sizeDecimals);
+  const stopDistance = atr * params.atrStopMultiplier;
+  const size = calculatePositionSize(state.balanceTotal, entryPrice, atr, maxPositionSize, sizeDecimals, params);
 
   logInfo("O1_RISK", "Position sizing calculated", {
     balance: roundMetric(state.balanceTotal),
-    riskPct: EMA_ATR_TRAIL_3M_PARAMS.riskPct,
+    riskPct: params.riskPct,
     stopDistance: roundMetric(stopDistance),
     size: roundMetric(size),
     atr: roundMetric(atr),
@@ -272,8 +271,8 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   }
 
   const stopLoss = crossedLong
-    ? roundTo(entryPrice - atr * EMA_ATR_TRAIL_3M_PARAMS.atrStopMultiplier, priceDecimals)
-    : roundTo(entryPrice + atr * EMA_ATR_TRAIL_3M_PARAMS.atrStopMultiplier, priceDecimals);
+    ? roundTo(entryPrice - atr * params.atrStopMultiplier, priceDecimals)
+    : roundTo(entryPrice + atr * params.atrStopMultiplier, priceDecimals);
 
   diagnostics.lastEntryPrice = entryPrice;
   diagnostics.currentStopLoss = stopLoss;
