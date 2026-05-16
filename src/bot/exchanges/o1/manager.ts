@@ -8,6 +8,7 @@ import {
   type O1CandleHandling,
 } from "./candleResolution";
 import { detectClosed3mBucketMs, mergeLive1mIntoEffective3mCache } from "./candleAggregation";
+import { detectDirectClosedCandleTs } from "./candleDirect";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
@@ -54,7 +55,10 @@ type O1BotEntry = {
   candleHandling: O1CandleHandling;
   oneMinuteCandles: O1Candle[];
   lastOneMinuteTs: number | null;
+  lastLiveCandleTs: number | null;
   lastClosedTickTs: number | null;
+  candlePayloadWatchdog?: NodeJS.Timeout;
+  candleConnectedAt: number;
 };
 
 export class O1BotManager {
@@ -86,7 +90,10 @@ export class O1BotManager {
     const usesAggregation = usesAggregatedCandles(candleHandling);
     const oneMinuteCandles: O1Candle[] = [];
     let lastOneMinuteTs: number | null = null;
+    let lastLiveCandleTs: number | null = null;
     let lastClosedTickTs: number | null = null;
+    let candleConnectedAt = 0;
+    let candlePayloadWatchdog: NodeJS.Timeout | undefined;
     const live1mBufferMax = 12;
 
     const preloadedCandles = await preloadO1Candles(config);
@@ -95,6 +102,9 @@ export class O1BotManager {
     state.preloadedCandleCount = preloadedCandles.length;
     if (preloadedCandles.length > 0) {
       state.lastPrice = Number(preloadedCandles[preloadedCandles.length - 1][4]);
+      if (!usesAggregation) {
+        lastLiveCandleTs = Number(preloadedCandles[preloadedCandles.length - 1]![0]);
+      }
     }
 
     logInfo("O1_CANDLE_PRELOAD", "Effective candle cache ready", {
@@ -122,14 +132,32 @@ export class O1BotManager {
       bot.state.ws.lastReconnectAttemptAt = Date.now();
       const delay = Math.min(config.reconnectMaxMs, config.reconnectBaseMs * 2 ** reconnectCount);
       logWarn("O1_WS", "Scheduling reconnect", { delay, reconnectCount });
-      bot.reconnectTimer = setTimeout(() => bot.wsHandle?.start(), delay);
+      bot.reconnectTimer = setTimeout(() => {
+        bot.wsHandle?.stop();
+        bot.wsHandle?.start();
+      }, delay);
+    };
+
+    const scheduleCandlePayloadWatchdog = () => {
+      if (candlePayloadWatchdog) clearTimeout(candlePayloadWatchdog);
+      candleConnectedAt = Date.now();
+      candlePayloadWatchdog = setTimeout(() => {
+        if (!state.ws.candleConnected) return;
+        if (state.ws.lastCandleUpdateAt >= candleConnectedAt) return;
+        logWarn("O1_WS", "Candle stream connected but no candle payload received", {
+          waitedMs: 90_000,
+          symbol: config.symbol,
+          streamResolution: candleHandling.streamResolution,
+          effectiveResolution: candleHandling.effectiveResolution,
+        });
+      }, 90_000);
     };
 
     const wsHandle = createO1WsStreams({
-      nord,
       config,
       state,
       candleStreamResolution: candleHandling.streamResolution,
+      onCandleConnected: scheduleCandlePayloadWatchdog,
       onCandle: (candle) => {
         if (usesAggregation) {
           const sourceTs = Number(candle[0]);
@@ -169,15 +197,21 @@ export class O1BotManager {
         }
 
         const ts = Number(candle[0]);
-        const previousLatestTs = state.candles.length > 0 ? Number(state.candles[state.candles.length - 1]?.[0]) : null;
+        const previousLatestTs = lastLiveCandleTs;
         upsertCandle(state.candles, candle, config.maxCandleCache);
+        lastLiveCandleTs = ts;
         state.lastPrice = Number(candle[4]);
-        logDebug("O1_CANDLE", "Candle cache updated", { ts, size: state.candles.length, price: state.lastPrice });
-        const closedCandleTs = previousLatestTs !== null && ts > previousLatestTs ? previousLatestTs : null;
+        logDebug("O1_CANDLE", "Direct candle cache updated", {
+          ts,
+          size: state.candles.length,
+          price: state.lastPrice,
+        });
+        const closedCandleTs = detectDirectClosedCandleTs(previousLatestTs, ts);
         if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
           lastClosedTickTs = closedCandleTs;
-          logInfo("O1_CLOSED_CANDLE", "Closed candle detected", {
+          logInfo("O1_CLOSED_DIRECT_CANDLE", "Closed direct candle detected", {
             closedCandleTs,
+            currentCandleTs: ts,
             effectiveResolution: candleHandling.effectiveResolution,
             cacheSize: state.candles.length,
           });
@@ -224,6 +258,7 @@ export class O1BotManager {
     }, Math.max(5000, Math.floor(config.wsStaleMs / 2)));
 
     const stop = async () => {
+      if (candlePayloadWatchdog) clearTimeout(candlePayloadWatchdog);
       wsHandle.stop();
       if (this.bots.get(botId)?.heartbeatTimer) clearInterval(this.bots.get(botId)!.heartbeatTimer);
       if (this.bots.get(botId)?.reconnectTimer) clearTimeout(this.bots.get(botId)!.reconnectTimer);
@@ -247,7 +282,10 @@ export class O1BotManager {
       candleHandling,
       oneMinuteCandles,
       lastOneMinuteTs,
+      lastLiveCandleTs,
       lastClosedTickTs,
+      candlePayloadWatchdog,
+      candleConnectedAt,
     });
 
     return botId;
