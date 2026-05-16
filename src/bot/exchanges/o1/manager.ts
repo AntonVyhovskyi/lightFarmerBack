@@ -9,6 +9,7 @@ import {
 } from "./candleResolution";
 import { detectClosed3mBucketMs, mergeLive1mIntoEffective3mCache } from "./candleAggregation";
 import { detectDirectClosedCandleTs } from "./candleDirect";
+import { pollRecentCandles } from "./candlePoll";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
@@ -37,6 +38,7 @@ import {
 import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
 import type { O1Candle, O1Diagnostics, O1EnvConfig, O1State } from "./types";
+import { hydrateExistingPositionState, logManageOnlyMode } from "./positionHydration";
 import { createO1WsStreams, type O1WsHandle } from "./ws";
 
 type O1BotEntry = {
@@ -58,7 +60,23 @@ type O1BotEntry = {
   lastLiveCandleTs: number | null;
   lastClosedTickTs: number | null;
   candlePayloadWatchdog?: NodeJS.Timeout;
+  candlePollTimer?: NodeJS.Timeout;
   candleConnectedAt: number;
+  lastPollIngestedTs: number | null;
+};
+
+const clampEntrySizeToLimits = (
+  size: number,
+  entryPrice: number,
+  maxOrderNotional: number,
+  maxPositionSize: number,
+  sizeDecimals: number
+): number => {
+  if (!Number.isFinite(size) || size <= 0 || entryPrice <= 0) return 0;
+  const maxByNotional = maxOrderNotional / entryPrice;
+  const raw = Math.min(size, maxByNotional, maxPositionSize);
+  const factor = 10 ** sizeDecimals;
+  return Math.floor(raw * factor) / factor;
 };
 
 export class O1BotManager {
@@ -94,6 +112,8 @@ export class O1BotManager {
     let lastClosedTickTs: number | null = null;
     let candleConnectedAt = 0;
     let candlePayloadWatchdog: NodeJS.Timeout | undefined;
+    let candlePollTimer: NodeJS.Timeout | undefined;
+    let lastPollIngestedTs: number | null = null;
     const live1mBufferMax = 12;
 
     const preloadedCandles = await preloadO1Candles(config);
@@ -102,8 +122,10 @@ export class O1BotManager {
     state.preloadedCandleCount = preloadedCandles.length;
     if (preloadedCandles.length > 0) {
       state.lastPrice = Number(preloadedCandles[preloadedCandles.length - 1][4]);
+      const seededTs = Number(preloadedCandles[preloadedCandles.length - 1]![0]);
       if (!usesAggregation) {
-        lastLiveCandleTs = Number(preloadedCandles[preloadedCandles.length - 1]![0]);
+        lastLiveCandleTs = seededTs;
+        lastPollIngestedTs = seededTs;
       }
     }
 
@@ -118,6 +140,23 @@ export class O1BotManager {
       const lastPreloadedTs = Number(state.candles[state.candles.length - 1]![0]);
       const snapshot = buildEmaAtrTrail3mTickSnapshot(state, lastPreloadedTs, config.strategyParams);
       markStrategyReadyOnce(state, snapshot);
+    }
+
+    logManageOnlyMode(config.manageExistingPositionOnly);
+    if (config.manageExistingPositionOnly && state.positionSize === 0) {
+      throw new Error("O1_MANAGE_EXISTING_POSITION_ONLY=true but no open position exists.");
+    }
+    if (state.positionSize !== 0) {
+      const hydrated = await hydrateExistingPositionState({
+        state,
+        nord,
+        config,
+        priceDecimals,
+        sizeDecimals,
+      });
+      if (!hydrated.ok) {
+        throw new Error(`Failed to hydrate existing position: ${hydrated.reason}`);
+      }
     }
 
     const reconnect = () => {
@@ -153,71 +192,103 @@ export class O1BotManager {
       }, 90_000);
     };
 
+    const handleLiveCandle = (candle: O1Candle, source: "ws" | "poll") => {
+      if (usesAggregation) {
+        const sourceTs = Number(candle[0]);
+        const previousLatest1mTs = lastOneMinuteTs;
+        upsertCandle(oneMinuteCandles, candle, live1mBufferMax);
+        lastOneMinuteTs = sourceTs;
+
+        const mergeResult = mergeLive1mIntoEffective3mCache(state.candles, oneMinuteCandles, config.maxCandleCache);
+        state.lastPrice = Number(candle[4]);
+        state.ws.lastCandleUpdateAt = Date.now();
+
+        const closedCandleTs = detectClosed3mBucketMs(oneMinuteCandles, previousLatest1mTs, sourceTs);
+        const diagnostics = compactCandleDiagnostics({
+          source1mBufferSize: oneMinuteCandles.length,
+          effective3mCandleCacheSize: state.candles.length,
+          preloaded3mCandleCount: state.preloadedCandleCount,
+          latestClosed3mCandleTs: closedCandleTs,
+          latestLive3mBucketTs: mergeResult.latestLive3mBucketTs,
+          formingBucketBarCount: mergeResult.formingBucketBarCount,
+        });
+        const cacheMismatch = state.candles.length < state.preloadedCandleCount;
+
+        if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
+          lastClosedTickTs = closedCandleTs;
+          logInfo("O1_CLOSED_3M_CANDLE", "Closed 3m aggregated candle detected", {
+            ...diagnostics,
+            effectiveResolution: candleHandling.effectiveResolution,
+            source,
+          });
+          logInfo("O1_CLOSED_CANDLE", "Closed aggregated candle detected", {
+            ...diagnostics,
+            effectiveResolution: candleHandling.effectiveResolution,
+            source,
+          });
+          void this.tick(botId, closedCandleTs);
+        } else if (cacheMismatch) {
+          logWarn("O1_CANDLE_LIVE_AGGREGATED", "Effective 3m cache below preloaded count", diagnostics);
+        } else if (source === "ws") {
+          logThrottle("O1_CANDLE_LIVE_AGGREGATED", 30_000, () => {
+            logDebug("O1_CANDLE_LIVE_AGGREGATED", "Merged live 1m into effective 3m cache", diagnostics);
+          });
+        }
+        return;
+      }
+
+      const ts = Number(candle[0]);
+      const previousLatestTs = lastLiveCandleTs;
+      upsertCandle(state.candles, candle, config.maxCandleCache);
+      lastLiveCandleTs = ts;
+      state.lastPrice = Number(candle[4]);
+      state.ws.lastCandleUpdateAt = Date.now();
+      logDebug("O1_CANDLE", "Direct candle cache updated", {
+        ts,
+        size: state.candles.length,
+        price: state.lastPrice,
+        source,
+      });
+      const closedCandleTs = detectDirectClosedCandleTs(previousLatestTs, ts);
+      if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
+        lastClosedTickTs = closedCandleTs;
+        logInfo("O1_CLOSED_DIRECT_CANDLE", "Closed direct candle detected", {
+          closedCandleTs,
+          currentCandleTs: ts,
+          effectiveResolution: candleHandling.effectiveResolution,
+          cacheSize: state.candles.length,
+          source,
+        });
+        void this.tick(botId, closedCandleTs);
+      }
+    };
+
+    const runCandlePoll = async () => {
+      try {
+        const pollCountback = usesAggregation ? 15 : 5;
+        const result = await pollRecentCandles({
+          config,
+          streamResolution: String(candleHandling.streamResolution),
+          countback: pollCountback,
+          lastIngestedTs: lastPollIngestedTs,
+          onCandle: (candle) => handleLiveCandle(candle, "poll"),
+        });
+        if (result.latestTs !== null) {
+          lastPollIngestedTs = result.latestTs;
+        }
+      } catch (error) {
+        logWarn("O1_CANDLE_POLL", "REST candle poll failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+
     const wsHandle = createO1WsStreams({
       config,
       state,
       candleStreamResolution: candleHandling.streamResolution,
       onCandleConnected: scheduleCandlePayloadWatchdog,
-      onCandle: (candle) => {
-        if (usesAggregation) {
-          const sourceTs = Number(candle[0]);
-          const previousLatest1mTs = lastOneMinuteTs;
-          upsertCandle(oneMinuteCandles, candle, live1mBufferMax);
-          lastOneMinuteTs = sourceTs;
-
-          const mergeResult = mergeLive1mIntoEffective3mCache(state.candles, oneMinuteCandles, config.maxCandleCache);
-          state.lastPrice = Number(candle[4]);
-
-          const closedCandleTs = detectClosed3mBucketMs(oneMinuteCandles, previousLatest1mTs, sourceTs);
-          const diagnostics = compactCandleDiagnostics({
-            source1mBufferSize: oneMinuteCandles.length,
-            effective3mCandleCacheSize: state.candles.length,
-            preloaded3mCandleCount: state.preloadedCandleCount,
-            latestClosed3mCandleTs: closedCandleTs,
-            latestLive3mBucketTs: mergeResult.latestLive3mBucketTs,
-            formingBucketBarCount: mergeResult.formingBucketBarCount,
-          });
-          const cacheMismatch = state.candles.length < state.preloadedCandleCount;
-
-          if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
-            lastClosedTickTs = closedCandleTs;
-            logInfo("O1_CLOSED_CANDLE", "Closed aggregated candle detected", {
-              ...diagnostics,
-              effectiveResolution: candleHandling.effectiveResolution,
-            });
-            void this.tick(botId, closedCandleTs);
-          } else if (cacheMismatch) {
-            logWarn("O1_CANDLE_LIVE_AGGREGATED", "Effective 3m cache below preloaded count", diagnostics);
-          } else {
-            logThrottle("O1_CANDLE_LIVE_AGGREGATED", 30_000, () => {
-              logDebug("O1_CANDLE_LIVE_AGGREGATED", "Merged live 1m into effective 3m cache", diagnostics);
-            });
-          }
-          return;
-        }
-
-        const ts = Number(candle[0]);
-        const previousLatestTs = lastLiveCandleTs;
-        upsertCandle(state.candles, candle, config.maxCandleCache);
-        lastLiveCandleTs = ts;
-        state.lastPrice = Number(candle[4]);
-        logDebug("O1_CANDLE", "Direct candle cache updated", {
-          ts,
-          size: state.candles.length,
-          price: state.lastPrice,
-        });
-        const closedCandleTs = detectDirectClosedCandleTs(previousLatestTs, ts);
-        if (closedCandleTs !== null && closedCandleTs !== lastClosedTickTs) {
-          lastClosedTickTs = closedCandleTs;
-          logInfo("O1_CLOSED_DIRECT_CANDLE", "Closed direct candle detected", {
-            closedCandleTs,
-            currentCandleTs: ts,
-            effectiveResolution: candleHandling.effectiveResolution,
-            cacheSize: state.candles.length,
-          });
-          void this.tick(botId, closedCandleTs);
-        }
-      },
+      onCandle: (candle) => handleLiveCandle(candle, "ws"),
       onAccount: (payload) => {
         this.handleAccountUpdate(state, payload, config.marketId);
       },
@@ -227,6 +298,16 @@ export class O1BotManager {
       onDisconnected: reconnect,
     });
     wsHandle.start();
+
+    void runCandlePoll();
+    candlePollTimer = setInterval(() => {
+      void runCandlePoll();
+    }, config.candlePollIntervalMs);
+    logInfo("O1_CANDLE_POLL", "REST candle polling enabled", {
+      intervalMs: config.candlePollIntervalMs,
+      streamResolution: candleHandling.streamResolution,
+      effectiveResolution: candleHandling.effectiveResolution,
+    });
 
     const fallbackSyncIntervalMs = Math.max(30_000, config.wsStaleMs);
     const heartbeatTimer = setInterval(async () => {
@@ -259,6 +340,7 @@ export class O1BotManager {
 
     const stop = async () => {
       if (candlePayloadWatchdog) clearTimeout(candlePayloadWatchdog);
+      if (candlePollTimer) clearInterval(candlePollTimer);
       wsHandle.stop();
       if (this.bots.get(botId)?.heartbeatTimer) clearInterval(this.bots.get(botId)!.heartbeatTimer);
       if (this.bots.get(botId)?.reconnectTimer) clearTimeout(this.bots.get(botId)!.reconnectTimer);
@@ -285,7 +367,9 @@ export class O1BotManager {
       lastLiveCandleTs,
       lastClosedTickTs,
       candlePayloadWatchdog,
+      candlePollTimer,
       candleConnectedAt,
+      lastPollIngestedTs,
     });
 
     return botId;
@@ -353,6 +437,13 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
+      if (config.manageExistingPositionOnly) {
+        logError("O1_STRATEGY_ERROR", "Entry blocked in manage-existing-position-only mode", {
+          side: action.type,
+          closedCandleTs,
+        });
+        return;
+      }
       if (state.positionSize !== 0) {
         logDebug("O1_STRATEGY_SKIP", "Open blocked because a position is already open", {
           positionSize: state.positionSize,
@@ -361,17 +452,34 @@ export class O1BotManager {
         return;
       }
 
+      const entrySize = clampEntrySizeToLimits(
+        action.size,
+        action.entryPrice,
+        config.maxOrderNotional,
+        config.maxPositionSize,
+        bot.sizeDecimals
+      );
+      if (entrySize <= 0) {
+        logError("O1_STRATEGY_ERROR", "Entry size clamped to zero", {
+          requestedSize: action.size,
+          entryPrice: action.entryPrice,
+          maxOrderNotional: config.maxOrderNotional,
+        });
+        return;
+      }
+
       logInfo("O1_ENTRY", "Executing entry", {
         side: action.type === "openLong" ? "long" : "short",
-        size: action.size,
+        size: entrySize,
+        requestedSize: action.size,
         entryPrice: action.entryPrice,
         stopLoss: action.stopLoss,
         dryRun: config.dryRun,
       });
 
       const openResult = action.type === "openLong"
-        ? await executor.openLong(action.size)
-        : await executor.openShort(action.size);
+        ? await executor.openLong(entrySize)
+        : await executor.openShort(entrySize);
       if (openResult.ok === false) {
         logError("O1_STRATEGY_ERROR", "Entry order failed", {
           side: action.type,
@@ -397,9 +505,11 @@ export class O1BotManager {
         return;
       }
 
-      logInfo("O1_SL", "Placing initial stop-loss", compactTriggerSpec(stopSpec));
+      const stopSize = Math.abs(state.positionSize) > 0 ? Math.abs(state.positionSize) : entrySize;
+      const stopSpecForPosition = { ...stopSpec, limitBaseSize: stopSize };
+      logInfo("O1_SL", "Placing initial stop-loss", compactTriggerSpec(stopSpecForPosition));
       if (!config.dryRun) {
-        const stopResult = await executor.placeStopLoss(stopSpec.triggerPrice, stopSide, stopSpec.limitBaseSize);
+        const stopResult = await executor.placeStopLoss(stopSpec.triggerPrice, stopSide, stopSize);
         if (stopResult.ok === false) {
           logError("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position", {
             reason: stopResult.reason,
@@ -506,6 +616,7 @@ export class O1BotManager {
       state.accountStateSource = "fetchInfo";
     }
     state.lastSyncAt = Date.now();
+    state.ws.lastAccountUpdateAt = Date.now();
     logSyncFromFetch(accountId, state);
   }
 

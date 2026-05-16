@@ -136,6 +136,15 @@ export const rebuildAggregated3mCandles = (oneMinuteCandles: O1Candle[], maxSize
   return trimCandles(aggregated, maxSize);
 };
 
+export const fetchRecentHistoryCandles = async (
+  config: O1EnvConfig,
+  resolution: string,
+  countback: number,
+  to = Math.floor(Date.now() / 1000)
+): Promise<O1Candle[]> => {
+  return loadHistoryCandles(config, resolution, countback, to);
+};
+
 const loadHistoryCandles = async (
   config: O1EnvConfig,
   resolution: string,

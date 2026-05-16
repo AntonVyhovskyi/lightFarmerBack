@@ -57,6 +57,8 @@ export type O1EnvConfig = {
   reconnectAttemptsMax: number;
   dailyLossLimit: number;
   debugWs: boolean;
+  candlePollIntervalMs: number;
+  manageExistingPositionOnly: boolean;
 };
 
 export type O1WsStatuses = {

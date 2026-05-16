@@ -224,6 +224,13 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
+  if (process.env.O1_MANAGE_EXISTING_POSITION_ONLY === "true") {
+    diagnostics.lastSignal = "none";
+    diagnostics.lastSignalReason = "manage-only-no-new-entries";
+    logDebug("O1_STRATEGY_SKIP", "Entry path skipped in manage-existing-position-only mode", { closedCandleTs });
+    return { type: "none", reason: diagnostics.lastSignalReason };
+  }
+
   const crossedLong = prevEma7 <= prevEma25 && ema7 > ema25;
   const crossedShort = prevEma7 >= prevEma25 && ema7 < ema25;
   if (!crossedLong && !crossedShort) {

@@ -1,6 +1,6 @@
 import { initWebSocketClient, type NordWebSocketClient, WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import type { CandleResolution } from "@n1xyz/nord-ts";
-import { createO1CandleWebSocket, toWsBaseUrl, type O1CandleWsHandle } from "./candleWs";
+import { isRelaxedCandlePayload, normalizeCandlePayload, candlePayloadToO1Candle, toWsBaseUrl } from "./candleWs";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
 import type { O1EnvConfig, O1State } from "./types";
 
@@ -28,14 +28,16 @@ export const createO1WsStreams = ({
   onTrade: (payload: WebSocketTradeUpdate) => void;
   onDisconnected: () => void;
 }): O1WsHandle => {
-  let candleWs: O1CandleWsHandle | null = null;
+  let candleWs: NordWebSocketClient | null = null;
   let accountWs: NordWebSocketClient | null = null;
   let tradesWs: NordWebSocketClient | null = null;
 
-  const wsBaseUrl = config.wsUrl || config.webServerUrl;
+  const httpBaseUrl = config.webServerUrl.replace(/\/$/, "");
+  const streamResolution = String(candleStreamResolution ?? config.resolution);
 
-  const bindNordDisconnect = (name: "account" | "trades", ws: NordWebSocketClient) => {
+  const bindNordDisconnect = (name: "candle" | "account" | "trades", ws: NordWebSocketClient) => {
     ws.on("disconnected", () => {
+      if (name === "candle") state.ws.candleConnected = false;
       if (name === "account") state.ws.accountConnected = false;
       if (name === "trades") state.ws.tradesConnected = false;
       logWarn("O1_WS", `${name} socket disconnected`, { stream: name });
@@ -44,6 +46,22 @@ export const createO1WsStreams = ({
     ws.on("error", (error) => {
       logError("O1_WS", `${name} socket error`, error);
     });
+  };
+
+  const handleCandlePayload = (payload: unknown): void => {
+    const nested = payload && typeof payload === "object" && "candle" in payload
+      ? (payload as { candle?: unknown }).candle
+      : payload;
+    if (!isRelaxedCandlePayload(nested)) {
+      logWarn("O1_CANDLE_WS", "Ignored non-candle websocket payload", {
+        keys: payload && typeof payload === "object" ? Object.keys(payload as object) : [],
+      });
+      return;
+    }
+    const normalized = normalizeCandlePayload(nested, config.marketId);
+    const candle = candlePayloadToO1Candle(normalized);
+    state.ws.lastCandleUpdateAt = Date.now();
+    onCandle(candle, normalized);
   };
 
   const stop = () => {
@@ -61,30 +79,29 @@ export const createO1WsStreams = ({
   const start = () => {
     stop();
 
-    const streamResolution = String(candleStreamResolution ?? config.resolution);
-    candleWs = createO1CandleWebSocket({
-      wsUrl: wsBaseUrl,
-      symbol: config.symbol,
-      resolution: streamResolution,
-      marketId: config.marketId,
-      state,
-      onCandle,
-      onConnected: () => {
-        logInfo("O1_WS", "Candle stream connected", {
-          streamResolution,
-          effectiveResolution: config.resolution,
-          wsUrl: toWsBaseUrl(wsBaseUrl),
-        });
-        onCandleConnected?.();
-      },
-      onDisconnected: () => {
-        logWarn("O1_WS", "candle socket disconnected", { stream: "candle" });
-        onDisconnected();
-      },
+    const candleSubscription = `candle@${config.symbol}:${streamResolution}`;
+    candleWs = initWebSocketClient(httpBaseUrl, [candleSubscription]);
+    candleWs.on("connected", () => {
+      state.ws.candleConnected = true;
+      logInfo("O1_WS", "Candle stream connected", {
+        streamResolution,
+        effectiveResolution: config.resolution,
+        subscription: candleSubscription,
+        wsUrl: `${toWsBaseUrl(config.wsUrl || config.webServerUrl)}/ws/${candleSubscription}`,
+      });
+      onCandleConnected?.();
     });
-    candleWs.connect();
+    candleWs.on("candle", (payload) => {
+      logDebug("O1_CANDLE_WS", "Candle payload received", {
+        ts: payload.t,
+        res: payload.res,
+        mid: payload.mid,
+      });
+      handleCandlePayload(payload);
+    });
+    bindNordDisconnect("candle", candleWs);
 
-    accountWs = initWebSocketClient(wsBaseUrl, [`account@${config.accountId!}`]);
+    accountWs = initWebSocketClient(httpBaseUrl, [`account@${config.accountId!}`]);
     if (config.debugWs) {
       logDebug("O1_WS", "Account subscription prepared", {
         accountId: config.accountId,
@@ -106,24 +123,20 @@ export const createO1WsStreams = ({
       logDebug("O1_WS", "Account payload received", {
         updateId: payload.update_id,
         places: Object.keys(payload.places ?? {}).length,
-        cancels: Object.keys(payload.cancels ?? {}).length,
-        fills: Object.keys(payload.fills ?? {}).length,
       });
       onAccount(payload);
     });
     bindNordDisconnect("account", accountWs);
-    accountWs.connect();
 
-    tradesWs = initWebSocketClient(wsBaseUrl, [`trades@${config.symbol}`]);
+    tradesWs = initWebSocketClient(httpBaseUrl, [`trades@${config.symbol}`]);
     tradesWs.on("connected", () => {
       state.ws.tradesConnected = true;
     });
-    tradesWs.on("trade", (payload) => {
+    tradesWs.on("trades", (payload) => {
       state.ws.lastTradesUpdateAt = Date.now();
       onTrade(payload);
     });
     bindNordDisconnect("trades", tradesWs);
-    tradesWs.connect();
   };
 
   return { start, stop };

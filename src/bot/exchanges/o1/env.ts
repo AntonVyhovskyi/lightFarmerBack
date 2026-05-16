@@ -62,6 +62,8 @@ export const readO1Env = (): O1EnvConfig => ({
   reconnectAttemptsMax: asNum(process.env.O1_RECONNECT_ATTEMPTS_MAX, 30),
   dailyLossLimit: asNum(process.env.O1_DAILY_LOSS_LIMIT, 100),
   debugWs: asBool(process.env.O1_DEBUG_WS, false),
+  candlePollIntervalMs: asNum(process.env.O1_CANDLE_POLL_MS, 20_000),
+  manageExistingPositionOnly: asBool(process.env.O1_MANAGE_EXISTING_POSITION_ONLY, false),
 });
 
 const isPositive = (value: number): boolean => Number.isFinite(value) && value > 0;
@@ -81,8 +83,8 @@ export const validateO1StrategyParams = (params: O1EmaAtrTrailStrategyParams): s
   if (!Number.isInteger(params.atrPeriod) || params.atrPeriod < 1) {
     invalid.push("O1_ATR_PERIOD must be a positive integer");
   }
-  if (!isPositive(params.strengthConfirmationPct)) {
-    invalid.push("O1_STRENGTH_CONFIRMATION_PCT must be > 0");
+  if (!Number.isFinite(params.strengthConfirmationPct) || params.strengthConfirmationPct < 0) {
+    invalid.push("O1_STRENGTH_CONFIRMATION_PCT must be >= 0");
   }
   if (!isPositive(params.riskPct) || params.riskPct > 100) {
     invalid.push("O1_RISK_PCT must be > 0 and <= 100");
