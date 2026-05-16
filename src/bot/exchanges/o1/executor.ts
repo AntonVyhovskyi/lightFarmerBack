@@ -352,4 +352,8 @@ export class O1Executor {
   getOpenOrders(): O1Order[] {
     return this.state.orders;
   }
+
+  getRecordedTriggerSpecs(): O1TriggerSpec[] {
+    return this.sentTriggerSpecs.map((spec) => ({ ...spec }));
+  }
 }

@@ -11,7 +11,7 @@ import { detectClosed3mBucketMs, mergeLive1mIntoEffective3mCache } from "./candl
 import { detectDirectClosedCandleTs } from "./candleDirect";
 import { pollRecentCandles } from "./candlePoll";
 import { upsertCandle } from "./candleCache";
-import { initO1Client, resetO1Client } from "./client";
+import { getInitializedO1Client, initO1Client, resetO1Client } from "./client";
 import { O1Executor } from "./executor";
 import {
   compactCandleDiagnostics,
@@ -32,14 +32,22 @@ import { createInitialO1State } from "./state";
 import { evaluateEmaAtrTrail3mStrategy } from "./strategies/emaAtrTrail3mStrategy";
 import {
   buildEmaAtrTrail3mTickSnapshot,
-  logEmaAtrTrail3mTick,
   markStrategyReadyOnce,
 } from "./strategies/emaAtrTrail3mDiagnostics";
 import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
 import type { O1Candle, O1Diagnostics, O1EnvConfig, O1State } from "./types";
+import { fetchActiveTriggers, triggersMatchSpec } from "./liveTestSupport";
 import { hydrateExistingPositionState, logManageOnlyMode } from "./positionHydration";
+import {
+  clearPositionLinkedStrategyState,
+  hasStalePositionStrategyState,
+  logStrategyStateUpdate,
+  logStrategyTickFromState,
+  seedStrategyDiagnosticsFromSnapshot,
+} from "./strategyStateLifecycle";
 import { createO1WsStreams, type O1WsHandle } from "./ws";
+import type { O1TriggerSpec } from "./types";
 
 type O1BotEntry = {
   id: string;
@@ -63,6 +71,7 @@ type O1BotEntry = {
   candlePollTimer?: NodeJS.Timeout;
   candleConnectedAt: number;
   lastPollIngestedTs: number | null;
+  lastKnownPositionSize: number;
 };
 
 const clampEntrySizeToLimits = (
@@ -140,6 +149,7 @@ export class O1BotManager {
       const lastPreloadedTs = Number(state.candles[state.candles.length - 1]![0]);
       const snapshot = buildEmaAtrTrail3mTickSnapshot(state, lastPreloadedTs, config.strategyParams);
       markStrategyReadyOnce(state, snapshot);
+      seedStrategyDiagnosticsFromSnapshot(state, snapshot, lastPreloadedTs);
     }
 
     logManageOnlyMode(config.manageExistingPositionOnly);
@@ -311,6 +321,9 @@ export class O1BotManager {
 
     const fallbackSyncIntervalMs = Math.max(30_000, config.wsStaleMs);
     const heartbeatTimer = setInterval(async () => {
+      const botEntry = this.bots.get(botId);
+      if (!botEntry) return;
+
       const now = Date.now();
       const accountAgeMs = state.ws.lastAccountUpdateAt > 0 ? now - state.ws.lastAccountUpdateAt : Number.POSITIVE_INFINITY;
       const wsStale = accountAgeMs > config.wsStaleMs;
@@ -336,6 +349,7 @@ export class O1BotManager {
         return;
       }
       this.syncStateFromUser(state, user, config.marketId, config.accountId!);
+      await this.reconcilePositionLifecycle(botEntry);
     }, Math.max(5000, Math.floor(config.wsStaleMs / 2)));
 
     const stop = async () => {
@@ -370,7 +384,13 @@ export class O1BotManager {
       candlePollTimer,
       candleConnectedAt,
       lastPollIngestedTs,
+      lastKnownPositionSize: state.positionSize,
     });
+
+    const bot = this.bots.get(botId);
+    if (bot) {
+      await this.reconcilePositionLifecycle(bot);
+    }
 
     return botId;
   }
@@ -408,15 +428,86 @@ export class O1BotManager {
   private async syncBotState(bot: O1BotEntry): Promise<void> {
     await bot.executor.syncAccount();
     this.syncStateFromUser(bot.state, bot.user, bot.config.marketId, bot.config.accountId!);
+    await this.reconcilePositionLifecycle(bot);
+  }
+
+  private collectBotOwnedTriggerSpecs(bot: O1BotEntry): O1TriggerSpec[] {
+    const specs: O1TriggerSpec[] = [];
+    const active = bot.state.strategy.activeStopLossSpec;
+    if (active) specs.push({ ...active });
+    for (const recorded of bot.executor.getRecordedTriggerSpecs()) {
+      if (!specs.some((spec) => this.triggerSpecEquals(spec, recorded))) {
+        specs.push({ ...recorded });
+      }
+    }
+    return specs;
+  }
+
+  private triggerSpecEquals(left: O1TriggerSpec, right: O1TriggerSpec): boolean {
+    return (
+      left.marketId === right.marketId &&
+      left.side === right.side &&
+      left.kind === right.kind &&
+      left.triggerPrice === right.triggerPrice &&
+      (left.limitBaseSize ?? undefined) === (right.limitBaseSize ?? undefined)
+    );
+  }
+
+  private async cleanupStaleBotTriggers(bot: O1BotEntry): Promise<void> {
+    if (bot.state.positionSize !== 0) return;
+    if (!bot.config.accountId) return;
+
+    const ownedSpecs = this.collectBotOwnedTriggerSpecs(bot);
+    if (ownedSpecs.length === 0) return;
+
+    const { nord } = getInitializedO1Client();
+    const triggers = await fetchActiveTriggers(nord, bot.config.accountId);
+    const marketTriggers = triggers.filter((t) => t.marketId === bot.config.marketId);
+
+    for (const owned of ownedSpecs) {
+      const match = marketTriggers.find((t) =>
+        triggersMatchSpec(t, owned, bot.priceDecimals, bot.sizeDecimals)
+      );
+      if (!match) continue;
+      const remove = await bot.executor.removeKnownTrigger(owned);
+      logInfo("O1_STALE_TRIGGER_CLEANUP", "Removed bot-owned trigger while flat", {
+        ok: remove.ok,
+        reason: remove.ok === false ? remove.reason : undefined,
+        trigger: owned,
+      });
+    }
+  }
+
+  private async reconcilePositionLifecycle(bot: O1BotEntry): Promise<void> {
+    const { state } = bot;
+    const wasPosition = bot.lastKnownPositionSize;
+    const isFlat = state.positionSize === 0;
+
+    if (wasPosition !== 0 && isFlat) {
+      clearPositionLinkedStrategyState(state);
+      logInfo("O1_POSITION_CLEARED", "Position closed; cleared strategy position state", {
+        previousPositionSize: wasPosition,
+        positionSize: state.positionSize,
+      });
+      await this.cleanupStaleBotTriggers(bot);
+    } else if (isFlat && hasStalePositionStrategyState(state)) {
+      clearPositionLinkedStrategyState(state);
+      logInfo("O1_POSITION_CLEARED", "Flat account; cleared stale strategy position state", {
+        positionSize: state.positionSize,
+      });
+      await this.cleanupStaleBotTriggers(bot);
+    }
+
+    bot.lastKnownPositionSize = state.positionSize;
   }
 
   private async runEmaAtrTrail3mStrategy(bot: O1BotEntry, closedCandleTs: number): Promise<void> {
     const { state, executor, config, candleHandling } = bot;
-    const tickSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs, config.strategyParams);
-    logEmaAtrTrail3mTick(tickSnapshot, candleHandling.effectiveResolution);
-    markStrategyReadyOnce(state, tickSnapshot);
 
     await this.syncBotState(bot);
+
+    const warmupSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs, config.strategyParams);
+    markStrategyReadyOnce(state, warmupSnapshot);
 
     const action = evaluateEmaAtrTrail3mStrategy({
       state,
@@ -428,8 +519,11 @@ export class O1BotManager {
       params: config.strategyParams,
     });
 
+    logStrategyStateUpdate(state, closedCandleTs);
+    logStrategyTickFromState(state, candleHandling.effectiveResolution, closedCandleTs);
+
     if (action.type === "none") {
-      logDebug("O1_STRATEGY_SKIP", "No strategy action for closed candle", {
+      logInfo("O1_STRATEGY_SKIP", "No strategy action for closed candle", {
         closedCandleTs,
         reason: action.reason,
       });

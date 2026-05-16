@@ -1,6 +1,6 @@
 import { ATR, EMA } from "technicalindicators";
 import { Side, TriggerKind } from "@n1xyz/nord-ts";
-import { logDebug, logError, logInfo, roundMetric } from "../logger";
+import { logError, logInfo, roundMetric } from "../logger";
 import type { O1Candle, O1EmaAtrTrailStrategyParams, O1State, O1TriggerSpec } from "../types";
 import { EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./types";
 
@@ -110,7 +110,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (diagnostics.lastProcessedCandleTs === closedCandleTs) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "duplicate-closed-candle";
-    logDebug("O1_STRATEGY_SKIP", "Closed candle already processed", { closedCandleTs });
+    logInfo("O1_STRATEGY_SKIP", "Closed candle already processed", { closedCandleTs });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
@@ -119,7 +119,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (closedCandles.length < minBars) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "insufficient-closed-candles";
-    logDebug("O1_STRATEGY_SKIP", "Not enough closed candles for indicators", {
+    logInfo("O1_STRATEGY_SKIP", "Not enough closed candles for indicators", {
       closedCandles: closedCandles.length,
       required: minBars,
     });
@@ -141,7 +141,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (ema7Series.length < 2 || ema25Series.length < 2 || atrSeries.length < 1) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "indicator-warmup-incomplete";
-    logDebug("O1_STRATEGY_SKIP", "Indicator warmup incomplete", {
+    logInfo("O1_STRATEGY_SKIP", "Indicator warmup incomplete", {
       ema7: ema7Series.length,
       ema25: ema25Series.length,
       atr: atrSeries.length,
@@ -161,13 +161,6 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   diagnostics.lastAtr = atr;
   diagnostics.lastProcessedCandleTs = closedCandleTs;
 
-  logDebug("O1_INDICATORS", "Indicator snapshot", {
-    closedCandleTs,
-    atr: roundMetric(atr),
-    emaShort: roundMetric(ema7),
-    emaLong: roundMetric(ema25),
-    close: roundMetric(close),
-  });
 
   if (state.positionSize !== 0) {
     const entryPrice = state.entryPrice > 0 ? state.entryPrice : close;
@@ -212,7 +205,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
 
       diagnostics.lastSignal = "none";
       diagnostics.lastSignalReason = "trailing-stop-unchanged";
-      logDebug("O1_STRATEGY_SKIP", "Trailing stop candidate did not improve", {
+      logInfo("O1_STRATEGY_SKIP", "Trailing stop candidate did not improve", {
         candidateStop,
         previousStop,
       });
@@ -227,7 +220,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (process.env.O1_MANAGE_EXISTING_POSITION_ONLY === "true") {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "manage-only-no-new-entries";
-    logDebug("O1_STRATEGY_SKIP", "Entry path skipped in manage-existing-position-only mode", { closedCandleTs });
+    logInfo("O1_STRATEGY_SKIP", "Entry path skipped in manage-existing-position-only mode", { closedCandleTs });
     return { type: "none", reason: diagnostics.lastSignalReason };
   }
 
@@ -236,7 +229,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (!crossedLong && !crossedShort) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "no-ema-cross";
-    logDebug("O1_STRATEGY_SKIP", "No EMA cross on closed candle", {
+    logInfo("O1_STRATEGY_SKIP", "No EMA cross on closed candle", {
       emaShort: roundMetric(ema7),
       emaLong: roundMetric(ema25),
     });
@@ -250,7 +243,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   if (strengthPct === null || strengthPct < params.strengthConfirmationPct) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "strength-below-threshold";
-    logDebug("O1_STRATEGY_SKIP", "Movement strength below threshold", {
+    logInfo("O1_STRATEGY_SKIP", "Movement strength below threshold", {
       side,
       strengthPct: roundMetric(strengthPct),
       required: params.strengthConfirmationPct,

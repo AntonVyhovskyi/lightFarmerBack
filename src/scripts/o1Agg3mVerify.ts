@@ -20,7 +20,11 @@ const REQUIRED_TAGS = [
   "O1_CANDLE_POLL",
   "O1_CLOSED_3M_CANDLE",
   "O1_STRATEGY_TICK",
+  "O1_STRATEGY_STATE_UPDATE",
+  "O1_STRATEGY_SKIP",
 ] as const;
+
+let sawStrategyStateUpdate = false;
 
 const importantLogs: string[] = [];
 const processedCandleTs = new Set<number>();
@@ -52,9 +56,10 @@ const captureLine = (line: string): void => {
       });
       if (source === "poll") sawClosed3mPoll = true;
     }
+    if (tag === "O1_STRATEGY_STATE_UPDATE") sawStrategyStateUpdate = true;
     if (tag === "O1_STRATEGY_TICK") {
       sawStrategyTick = true;
-      const tsMatch = line.match(/"closedCandleTs":(\d+)/);
+      const tsMatch = line.match(/"lastProcessedCandleTs":(\d+)/) ?? line.match(/"closedCandleTs":(\d+)/);
       if (tsMatch) {
         const ts = Number(tsMatch[1]);
         processedCandleTs.add(ts);
@@ -108,7 +113,7 @@ async function preflight(): Promise<{ positionSize: number; slCount: number; man
 async function main(): Promise<void> {
   process.env.O1_RESOLUTION = "3";
   process.env.O1_LOG_LEVEL = "info";
-  process.env.O1_DRY_RUN = "false";
+  process.env.O1_DRY_RUN = process.env.O1_AGG3M_VERIFY_DRY_RUN ?? "true";
 
   const pre = await preflight();
   process.env.O1_MANAGE_EXISTING_POSITION_ONLY = pre.manageOnly ? "true" : "false";
@@ -169,12 +174,24 @@ async function main(): Promise<void> {
     const maxCache = cacheSizeSamples.length ? Math.max(...cacheSizeSamples) : 0;
     const cacheCollapsed = maxCache > 0 && minCache < Math.max(20, initialPreloadCount * 0.5);
     const duplicateTickTs = [...tickCountByTs.values()].some((c) => c > 1);
+    const strategy = finalDiagnostics.strategy;
+    const flat = finalDiagnostics.account.positionSize === 0;
+    const strategyDiagnosticsOk =
+      strategy.lastProcessedCandleTs !== null &&
+      strategy.lastEma7 !== null &&
+      strategy.lastEma25 !== null &&
+      strategy.lastAtr !== null &&
+      strategy.lastSignalReason !== "not-started" &&
+      (!flat || (strategy.activeStopLossSpec === null && strategy.currentStopLoss === null && !strategy.trailingActive));
+
     const success =
       sawCandleMode &&
       sawPreloadAggregated &&
       sawCandlePoll &&
       sawClosed3mPoll &&
       sawStrategyTick &&
+      sawStrategyStateUpdate &&
+      strategyDiagnosticsOk &&
       finalDiagnostics.candles.configuredResolution === "3" &&
       finalDiagnostics.candles.effectiveResolution === "3" &&
       finalDiagnostics.candles.candleMode === "aggregated" &&
@@ -203,6 +220,7 @@ async function main(): Promise<void> {
           cacheSizeSamples: { min: minCache, max: maxCache, initialPreloadCount, collapsed: cacheCollapsed },
           finalDiagnostics,
           finalAccount: { positionSize: state.positionSize, slCount: slTriggers.length, slTriggers },
+          strategyDiagnosticsOk,
           productionSafe: success,
           importantLogs,
         },
