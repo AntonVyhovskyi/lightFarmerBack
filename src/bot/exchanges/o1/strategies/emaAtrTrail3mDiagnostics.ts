@@ -1,6 +1,7 @@
 import { ATR, EMA } from "technicalindicators";
 import { logInfo, roundMetric } from "../logger";
 import type { O1Candle, O1EmaAtrTrailStrategyParams, O1State } from "../types";
+import { getStrengthPct } from "./strengthPct";
 
 export type EmaAtrTrail3mTickSnapshot = {
   latestCandleTs: number | null;
@@ -20,23 +21,6 @@ export type EmaAtrTrail3mTickSnapshot = {
 
 const getClosedCandles = (state: O1State, closedCandleTs: number): O1Candle[] => {
   return state.candles.filter((candle) => Number(candle[0]) <= closedCandleTs);
-};
-
-const getStrengthPct = (
-  side: "long" | "short",
-  closes: number[],
-  params: O1EmaAtrTrailStrategyParams
-): number | null => {
-  if (closes.length < params.strengthLookbackCandles) return null;
-  const recent = closes.slice(-params.strengthLookbackCandles);
-  const currentClose = recent[recent.length - 1]!;
-  if (!Number.isFinite(currentClose) || currentClose <= 0) return null;
-  if (side === "long") {
-    const highest = Math.max(...recent);
-    return ((highest - currentClose) / currentClose) * 100;
-  }
-  const lowest = Math.min(...recent);
-  return ((currentClose - lowest) / currentClose) * 100;
 };
 
 export const buildEmaAtrTrail3mTickSnapshot = (
@@ -67,6 +51,7 @@ export const buildEmaAtrTrail3mTickSnapshot = (
   if (!base.indicatorsReady) return base;
 
   const closes = closedCandles.map((candle) => Number(candle[4]));
+  const candleTs = closedCandles.map((candle) => Number(candle[0]));
   const highs = closedCandles.map((candle) => Number(candle[2]));
   const lows = closedCandles.map((candle) => Number(candle[3]));
   const ema7Series = EMA.calculate({ values: closes, period: params.emaShortPeriod });
@@ -85,7 +70,7 @@ export const buildEmaAtrTrail3mTickSnapshot = (
   const crossedLong = prevEma7 <= prevEma25 && ema7 > ema25;
   const crossedShort = prevEma7 >= prevEma25 && ema7 < ema25;
   const crossover = crossedLong ? "long" : crossedShort ? "short" : "none";
-  const strengthPct = crossover === "none" ? null : getStrengthPct(crossover, closes, params);
+  const strengthPct = crossover === "none" ? null : getStrengthPct(crossover, closes, params, candleTs);
 
   return {
     ...base,

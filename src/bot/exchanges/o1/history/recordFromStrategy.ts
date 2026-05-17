@@ -1,9 +1,18 @@
 ﻿import type { O1CandleHandling } from "../candleResolution";
 import type { O1EmaAtrTrailStrategyParams, O1EnvConfig, O1State } from "../types";
 import type { O1CrossoverSnapshot } from "../strategies/emaAtrTrail3mStrategy";
+import { strengthDetailsForCrossover } from "../strategies/strengthPct";
 import { recordCrossover } from "./crossoverCache";
 import { mapStrategyReasonToCrossoverReason } from "./crossoverReason";
 import type { O1CrossoverReason, O1CrossoverRecord } from "./types";
+
+const mergeCrossoverDetails = (
+  details: Record<string, unknown>,
+  snapshot: O1CrossoverSnapshot
+): Record<string, unknown> => ({
+  ...details,
+  ...strengthDetailsForCrossover(snapshot.strengthDetails),
+});
 
 export const buildCrossoverRecordInput = (
   bot: {
@@ -33,7 +42,7 @@ export const buildCrossoverRecordInput = (
   calculatedSize: snapshot.calculatedSize ?? null,
   stopLoss: snapshot.stopLoss ?? null,
   reason,
-  details,
+  details: mergeCrossoverDetails(details, snapshot),
 });
 
 export const recordCrossoverFromStrategySkip = (

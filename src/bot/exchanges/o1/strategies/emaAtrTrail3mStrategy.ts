@@ -2,6 +2,7 @@ import { ATR, EMA } from "technicalindicators";
 import { Side, TriggerKind } from "@n1xyz/nord-ts";
 import { logError, logInfo, roundMetric } from "../logger";
 import type { O1Candle, O1EmaAtrTrailStrategyParams, O1State, O1TriggerSpec } from "../types";
+import { computeStrengthPct, type O1StrengthCalcDebug } from "./strengthPct";
 import { EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./types";
 
 export type O1CrossoverSnapshot = {
@@ -11,6 +12,7 @@ export type O1CrossoverSnapshot = {
   emaLong: number;
   atr: number;
   strengthPct: number | null;
+  strengthDetails?: O1StrengthCalcDebug | null;
   calculatedSize?: number;
   stopLoss?: number;
 };
@@ -65,23 +67,6 @@ const getClosedCandles = (state: O1State, closedCandleTs: number): O1Candle[] =>
 };
 
 const getCloses = (candles: O1Candle[]): number[] => candles.map((candle) => Number(candle[4]));
-
-const getStrengthPct = (
-  side: "long" | "short",
-  closes: number[],
-  params: O1EmaAtrTrailStrategyParams
-): number | null => {
-  if (closes.length < params.strengthLookbackCandles) return null;
-  const recent = closes.slice(-params.strengthLookbackCandles);
-  const currentClose = recent[recent.length - 1]!;
-  if (!Number.isFinite(currentClose) || currentClose <= 0) return null;
-  if (side === "long") {
-    const highest = Math.max(...recent);
-    return ((highest - currentClose) / currentClose) * 100;
-  }
-  const lowest = Math.min(...recent);
-  return ((currentClose - lowest) / currentClose) * 100;
-};
 
 const calculatePositionSize = (
   balance: number,
@@ -140,6 +125,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   }
 
   const closes = getCloses(closedCandles);
+  const candleTs = closedCandles.map((candle) => Number(candle[0]));
   const highs = closedCandles.map((candle) => Number(candle[2]));
   const lows = closedCandles.map((candle) => Number(candle[3]));
   const ema7Series = EMA.calculate({ values: closes, period: params.emaShortPeriod });
@@ -242,6 +228,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   const buildCrossoverSnapshot = (
     direction: "long" | "short",
     strengthPctValue: number | null,
+    strengthDetails?: O1StrengthCalcDebug | null,
     extras?: { calculatedSize?: number; stopLoss?: number }
   ): O1CrossoverSnapshot => ({
     direction,
@@ -250,6 +237,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     emaLong: ema25,
     atr,
     strengthPct: strengthPctValue,
+    strengthDetails,
     ...extras,
   });
   if (!crossedLong && !crossedShort) {
@@ -263,9 +251,26 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   }
 
   const side = crossedLong ? "long" : "short";
-  const strengthPct = getStrengthPct(side, closes, params);
+  const strengthCalc = computeStrengthPct(side, closes, candleTs, params.strengthLookbackCandles);
+  const strengthPct = strengthCalc.strengthPct;
+  const strengthDetails = strengthCalc.debug;
   diagnostics.lastStrengthPct = strengthPct;
-  const crossoverBase = buildCrossoverSnapshot(side, strengthPct);
+  const crossoverBase = buildCrossoverSnapshot(side, strengthPct, strengthDetails);
+
+  logInfo("O1_STRENGTH_CALC", "Crossover strength calculated", {
+    direction: side,
+    currentClose: roundMetric(strengthDetails?.currentClose ?? close),
+    lookbackCloses: strengthDetails?.lookbackCloses.map((v) => roundMetric(v)),
+    lookbackCandleTs: strengthDetails?.lookbackCandleTs,
+    highestClose: roundMetric(strengthDetails?.highestClose),
+    lowestClose: roundMetric(strengthDetails?.lowestClose),
+    selectedReferenceClose: roundMetric(strengthDetails?.selectedReferenceClose),
+    selectedReferenceCandleTs: strengthDetails?.selectedReferenceCandleTs,
+    formula: strengthDetails?.formula,
+    strengthPct: roundMetric(strengthPct),
+    required: params.strengthConfirmationPct,
+    lookbackCandles: params.strengthLookbackCandles,
+  });
 
   if (strengthPct === null || strengthPct < params.strengthConfirmationPct) {
     diagnostics.lastSignal = "none";
@@ -297,7 +302,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     return {
       type: "none",
       reason: diagnostics.lastSignalReason,
-      crossover: buildCrossoverSnapshot(side, strengthPct, { calculatedSize: size }),
+      crossover: buildCrossoverSnapshot(side, strengthPct, strengthDetails, { calculatedSize: size }),
     };
   }
 
@@ -326,7 +331,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     side,
   });
 
-  const crossoverSignal = buildCrossoverSnapshot(side, strengthPct, { calculatedSize: size, stopLoss });
+  const crossoverSignal = buildCrossoverSnapshot(side, strengthPct, strengthDetails, { calculatedSize: size, stopLoss });
 
   if (crossedLong) {
     diagnostics.lastSignal = "open-long";

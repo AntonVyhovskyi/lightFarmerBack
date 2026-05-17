@@ -1,5 +1,6 @@
 ﻿import type { O1CandleHandling } from "../candleResolution";
 import type { O1CrossoverSnapshot } from "../strategies/emaAtrTrail3mStrategy";
+import { strengthDetailsForCrossover } from "../strategies/strengthPct";
 import type { O1EnvConfig, O1State } from "../types";
 import { recordCrossover } from "./crossoverCache";
 import { recordEntry } from "./entryCache";
@@ -26,7 +27,12 @@ export const recordManagerCrossoverSkip = (
   details: Record<string, unknown>
 ): O1CrossoverRecord | null => {
   if (!snapshot) return null;
-  return recordCrossover(buildCrossoverRecordInput(bot, closedCandleTs, snapshot, reason, details));
+  return recordCrossover(
+    buildCrossoverRecordInput(bot, closedCandleTs, snapshot, reason, {
+      ...details,
+      ...strengthDetailsForCrossover(snapshot.strengthDetails),
+    })
+  );
 };
 
 export const recordManagerEntryEvent = (
