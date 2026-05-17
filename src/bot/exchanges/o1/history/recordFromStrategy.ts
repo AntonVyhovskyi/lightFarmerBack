@@ -35,7 +35,10 @@ export const buildCrossoverRecordInput = (
   emaLong: snapshot.emaLong,
   atr: snapshot.atr,
   strengthPct: snapshot.strengthPct,
-  strengthConfirmationPct: bot.config.strategyParams.strengthConfirmationPct,
+  strengthConfirmationPct:
+    "strengthConfirmationPct" in bot.config.strategyParams
+      ? bot.config.strategyParams.strengthConfirmationPct
+      : 0,
   positionSize: bot.state.positionSize,
   balanceTotal: bot.state.balanceTotal,
   riskPct: bot.config.strategyParams.riskPct,

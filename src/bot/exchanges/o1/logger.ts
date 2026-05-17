@@ -174,6 +174,7 @@ export const compactTriggerSpec = (spec: O1TriggerSpec): Record<string, unknown>
   marketId: spec.marketId,
   side: spec.side,
   kind: spec.kind,
+  triggerId: spec.triggerId?.toString(),
   triggerPrice: spec.triggerPrice,
   limitPrice: spec.limitPrice,
   limitBaseSize: spec.limitBaseSize,

@@ -1,6 +1,11 @@
 ﻿import { logInfo, roundMetric } from "./logger";
 import type { O1State } from "./types";
-import type { EmaAtrTrail3mTickSnapshot } from "./strategies/emaAtrTrail3mDiagnostics";
+type StrategySeedSnapshot = {
+  indicatorsReady: boolean;
+  emaShort: number | null;
+  emaLong: number | null;
+  atr: number | null;
+};
 
 export const hasStalePositionStrategyState = (state: O1State): boolean => {
   const strategy = state.strategy;
@@ -9,7 +14,9 @@ export const hasStalePositionStrategyState = (state: O1State): boolean => {
     strategy.currentStopLoss !== null ||
     strategy.lastEntryPrice !== null ||
     strategy.trailingActive ||
-    strategy.lastTrailingUpdateCandleTs !== null
+    strategy.breakEvenActive ||
+    strategy.lastTrailingUpdateCandleTs !== null ||
+    strategy.entryCandleTs !== null
   );
 };
 
@@ -19,13 +26,20 @@ export const clearPositionLinkedStrategyState = (state: O1State): void => {
   strategy.currentStopLoss = null;
   strategy.lastEntryPrice = null;
   strategy.trailingActive = false;
+  strategy.breakEvenActive = false;
   strategy.lastTrailingUpdateCandleTs = null;
+  strategy.entryCandleTs = null;
   state.trailingActive = false;
+  state.beActive = false;
+};
+
+export const applyExitCooldown = (state: O1State, cooldownCandles: number): void => {
+  state.strategy.cooldownCandlesRemaining = Math.max(0, cooldownCandles);
 };
 
 export const seedStrategyDiagnosticsFromSnapshot = (
   state: O1State,
-  snapshot: EmaAtrTrail3mTickSnapshot,
+  snapshot: StrategySeedSnapshot,
   closedCandleTs: number
 ): void => {
   const strategy = state.strategy;
@@ -58,7 +72,9 @@ export const logStrategyStateUpdate = (state: O1State, closedCandleTs: number): 
     atr: roundMetric(strategy.lastAtr),
     strengthPct: roundMetric(strategy.lastStrengthPct),
     currentStopLoss: roundMetric(strategy.currentStopLoss),
+    breakEvenActive: strategy.breakEvenActive,
     trailingActive: strategy.trailingActive,
+    cooldownCandlesRemaining: strategy.cooldownCandlesRemaining,
     positionSize: state.positionSize,
   });
 };
@@ -76,6 +92,8 @@ export const logStrategyTickFromState = (state: O1State, effectiveResolution: st
     lastSignalReason: strategy.lastSignalReason,
     strengthPct: roundMetric(strategy.lastStrengthPct),
     positionSize: state.positionSize,
+    breakEvenActive: strategy.breakEvenActive,
     trailingActive: strategy.trailingActive,
+    cooldownCandlesRemaining: strategy.cooldownCandlesRemaining,
   });
 };

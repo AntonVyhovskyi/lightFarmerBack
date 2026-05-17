@@ -30,6 +30,29 @@ export type O1EmaAtrTrailStrategyParams = {
   strengthLookbackCandles: number;
 };
 
+export type O1EmaCrossoverAtrLiveParams = {
+  emaShortPeriod: number;
+  emaLongPeriod: number;
+  atrPeriod: number;
+  atrStopMultiplier: number;
+  riskPct: number;
+  leverage: number;
+  breakEvenPct: number;
+  trailingStartPct: number;
+  trailingGapPct: number;
+  cooldownCandles: number;
+  minMoveVsFeeMult: number;
+  feeRate: number;
+  maxTradesPerDay: number;
+  takeProfitPct: number;
+  maxHoldCandles: number;
+  exitOnOppositeSignal: boolean;
+  strengthLookbackCandles: number;
+  minStopDistancePct: number;
+};
+
+export type O1StrategyParams = O1EmaAtrTrailStrategyParams | O1EmaCrossoverAtrLiveParams;
+
 export type O1EnvConfig = {
   enabled: boolean;
   dryRun: boolean;
@@ -46,7 +69,7 @@ export type O1EnvConfig = {
   strategyName: string;
   riskPct: number;
   defaultLeverage: number;
-  strategyParams: O1EmaAtrTrailStrategyParams;
+  strategyParams: O1StrategyParams;
   maxPositionSize: number;
   maxOrderNotional: number;
   maxCandleCache: number;
@@ -161,6 +184,7 @@ export type O1TriggerSpec = {
   side: Side;
   kind: TriggerKind;
   triggerPrice: number;
+  triggerId?: bigint;
   limitPrice?: number;
   limitBaseSize?: number;
   limitQuoteSize?: number;
@@ -188,7 +212,7 @@ export type O1Diagnostics = {
     candleMode: "direct" | "aggregated";
     streamResolution: string;
   };
-  strategyParams: O1EmaAtrTrailStrategyParams;
+  strategyParams: O1StrategyParams;
   initialized: {
     nord: boolean;
     user: boolean;
@@ -225,4 +249,9 @@ export type O1Diagnostics = {
   };
   strategy: O1StrategyDiagnostics;
   history: O1HistoryDiagnostics;
+  poll: {
+    intervalMs: number;
+    lastPollIngestedTs: number | null;
+    enabled: boolean;
+  };
 };

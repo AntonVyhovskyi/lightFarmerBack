@@ -7,7 +7,8 @@ import {
   logError,
   logInfo,
 } from "./logger";
-import { ensureO1TradingSession } from "./session";
+import { roundToDecimals, sleep } from "./liveTestSupport";
+import { ensureO1TradingSession, refreshO1TradingSession } from "./session";
 import { validateClosePosition, validatePreTrade, validateSafetyGuardrails } from "./validators";
 import type { O1EnvConfig, O1Order, O1PlaceOrderRequest, O1Result, O1State, O1TriggerSpec } from "./types";
 
@@ -224,14 +225,51 @@ export class O1Executor {
     });
   }
 
-  async placeStopLoss(triggerPrice: number, side: Side, size?: number): Promise<O1Result> {
+  async placeStopLoss(triggerPrice: number, side: Side, size?: number): Promise<O1Result<{ triggerId?: string }>> {
     return this.addTrigger({
       marketId: this.config.marketId,
       side,
       kind: TriggerKind.StopLoss,
       triggerPrice,
+      limitPrice: triggerPrice,
       limitBaseSize: size,
     });
+  }
+
+  async placeInitialStopLoss(
+    spec: O1TriggerSpec,
+    priceDecimals: number,
+    sizeDecimals: number,
+    postEntryDelayMs = 1500
+  ): Promise<O1Result<{ triggerId?: string }>> {
+    const roundedSpec: O1TriggerSpec = {
+      ...spec,
+      triggerPrice: roundToDecimals(spec.triggerPrice, priceDecimals),
+      limitPrice:
+        spec.limitPrice !== undefined
+          ? roundToDecimals(spec.limitPrice, priceDecimals)
+          : roundToDecimals(spec.triggerPrice, priceDecimals),
+      limitBaseSize:
+        spec.limitBaseSize !== undefined
+          ? roundToDecimals(spec.limitBaseSize, sizeDecimals)
+          : undefined,
+    };
+
+    await sleep(postEntryDelayMs);
+    let lastResult: O1Result<{ triggerId?: string }> = { ok: false, reason: "stop-loss-not-attempted" };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await sleep(2000 * attempt);
+      const session = await refreshO1TradingSession(this.user, this.config.dryRun);
+      if (!session.ok) return session;
+      lastResult = await this.addTrigger(roundedSpec);
+      if (lastResult.ok) return lastResult;
+      logError("O1_SL", "Stop-loss placement attempt failed", {
+        attempt: attempt + 1,
+        reason: lastResult.reason,
+        triggerPrice: roundedSpec.triggerPrice,
+      });
+    }
+    return lastResult;
   }
 
   async placeTakeProfit(triggerPrice: number, side: Side, size?: number): Promise<O1Result> {
@@ -244,13 +282,19 @@ export class O1Executor {
     });
   }
 
-  async updateStopLoss(oldSpec: O1TriggerSpec, nextSpec: O1TriggerSpec): Promise<O1Result> {
+  async updateStopLoss(oldSpec: O1TriggerSpec, nextSpec: O1TriggerSpec): Promise<O1Result<{ triggerId?: string }>> {
+    if (oldSpec.triggerId !== undefined) {
+      return this.editTrigger(oldSpec.triggerId, nextSpec);
+    }
     const remove = await this.removeTrigger(oldSpec);
     if (!remove.ok) return remove;
     return this.addTrigger(nextSpec);
   }
 
-  async updateTakeProfit(oldSpec: O1TriggerSpec, nextSpec: O1TriggerSpec): Promise<O1Result> {
+  async updateTakeProfit(oldSpec: O1TriggerSpec, nextSpec: O1TriggerSpec): Promise<O1Result<{ triggerId?: string }>> {
+    if (oldSpec.triggerId !== undefined) {
+      return this.editTrigger(oldSpec.triggerId, nextSpec);
+    }
     const remove = await this.removeTrigger(oldSpec);
     if (!remove.ok) return remove;
     return this.addTrigger(nextSpec);
@@ -270,6 +314,9 @@ export class O1Executor {
   }
 
   private triggerSpecsMatch(left: O1TriggerSpec, right: O1TriggerSpec): boolean {
+    if (left.triggerId !== undefined && right.triggerId !== undefined) {
+      return left.triggerId === right.triggerId;
+    }
     return (
       left.marketId === right.marketId &&
       left.side === right.side &&
@@ -281,7 +328,44 @@ export class O1Executor {
     );
   }
 
-  private async addTrigger(spec: O1TriggerSpec): Promise<O1Result> {
+  private async editTrigger(triggerId: bigint, spec: O1TriggerSpec): Promise<O1Result<{ triggerId?: string }>> {
+    const compact = compactTriggerSpec({ ...spec, triggerId });
+    const tag = spec.kind === TriggerKind.TakeProfit ? "O1_TP" : "O1_SL";
+    if (this.config.dryRun) {
+      logInfo(tag, "Dry-run blocked live trigger edit", compact);
+      return { ok: true, data: { triggerId: triggerId.toString() } };
+    }
+
+    const sessionError = await this.ensureLiveSession();
+    if (sessionError) return sessionError;
+
+    try {
+      logInfo(tag, "Editing trigger", compact);
+      await this.user.editTrigger({
+        triggerId,
+        marketId: spec.marketId,
+        side: spec.side,
+        kind: spec.kind,
+        triggerPrice: spec.triggerPrice,
+        limitPrice: spec.limitPrice,
+        limitBaseSize: spec.limitBaseSize,
+        limitQuoteSize: spec.limitQuoteSize,
+        accountId: this.config.accountId,
+      });
+      const stored = { ...spec, triggerId };
+      const index = this.sentTriggerSpecs.findIndex((entry) => entry.triggerId === triggerId);
+      if (index >= 0) this.sentTriggerSpecs[index] = stored;
+      else this.rememberTrigger(stored);
+      logInfo(tag, "Trigger edited", compact);
+      return { ok: true, data: { triggerId: triggerId.toString() } };
+    } catch (err) {
+      const normalized = normalizeO1Error(err);
+      logNormalizedFailure(tag, "Trigger edit failed", normalized);
+      return normalized;
+    }
+  }
+
+  private async addTrigger(spec: O1TriggerSpec): Promise<O1Result<{ triggerId?: string }>> {
     const compact = compactTriggerSpec(spec);
     const tag = spec.kind === TriggerKind.TakeProfit ? "O1_TP" : "O1_SL";
     if (this.config.dryRun) {
@@ -294,10 +378,11 @@ export class O1Executor {
 
     try {
       logInfo(tag, "Submitting trigger", compact);
-      await this.user.addTrigger({ ...spec, accountId: this.config.accountId });
-      this.rememberTrigger(spec);
-      logInfo(tag, "Trigger submitted", compact);
-      return { ok: true };
+      const result = await this.user.addTrigger({ ...spec, accountId: this.config.accountId });
+      const stored = { ...spec, triggerId: result.triggerId };
+      this.rememberTrigger(stored);
+      logInfo(tag, "Trigger submitted", { ...compact, triggerId: result.triggerId.toString() });
+      return { ok: true, data: { triggerId: result.triggerId.toString() } };
     } catch (err) {
       const normalized = normalizeO1Error(err);
       logNormalizedFailure(tag, "Trigger submission failed", normalized);
@@ -316,9 +401,18 @@ export class O1Executor {
     const sessionError = await this.ensureLiveSession();
     if (sessionError) return sessionError;
 
+    if (spec.triggerId === undefined) {
+      logError(tag, "Cannot remove trigger without triggerId", compact);
+      return { ok: false, reason: "trigger_execution_failed" };
+    }
+
     try {
       logInfo(tag, "Removing trigger", compact);
-      await this.user.removeTrigger({ ...spec, accountId: this.config.accountId });
+      await this.user.removeTrigger({
+        marketId: spec.marketId,
+        triggerId: spec.triggerId,
+        accountId: this.config.accountId,
+      });
       this.forgetTrigger(spec);
       logInfo(tag, "Trigger removed", compact);
       return { ok: true };

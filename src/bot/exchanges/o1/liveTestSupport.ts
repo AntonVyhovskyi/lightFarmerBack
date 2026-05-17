@@ -100,6 +100,7 @@ export const toTriggerSpecFromApi = (
   marketId: trigger.marketId,
   side: trigger.side === "ask" ? Side.Ask : Side.Bid,
   kind: trigger.kind === "takeProfit" ? TriggerKind.TakeProfit : TriggerKind.StopLoss,
+  triggerId: BigInt(trigger.triggerId),
   triggerPrice: unscaleMantissa(Number(trigger.triggerPrice), priceDecimals),
   limitPrice: trigger.limitPrice != null ? unscaleMantissa(Number(trigger.limitPrice), priceDecimals) : undefined,
   limitBaseSize: trigger.limitBaseSize != null ? unscaleMantissa(Number(trigger.limitBaseSize), sizeDecimals) : undefined,
@@ -108,6 +109,7 @@ export const toTriggerSpecFromApi = (
 
 export type O1TriggerSummary = {
   marketId: number;
+  triggerId: number;
   side: string;
   kind: string;
   status: string;
@@ -128,9 +130,10 @@ export const summarizeTrigger = (
   const spec = toTriggerSpecFromApi(trigger, priceDecimals, sizeDecimals);
   return {
     marketId: trigger.marketId,
+    triggerId: Number(trigger.triggerId),
     side: trigger.side,
     kind: trigger.kind,
-    status: trigger.status,
+    status: (trigger as { status?: string }).status ?? "active",
     triggerPriceMantissa: Number(trigger.triggerPrice),
     limitPriceMantissa: trigger.limitPrice != null ? Number(trigger.limitPrice) : null,
     limitBaseSizeMantissa: trigger.limitBaseSize != null ? Number(trigger.limitBaseSize) : null,
@@ -148,14 +151,19 @@ export const triggersMatchSpec = (
   sizeDecimals: number
 ): boolean => {
   const normalized = toTriggerSpecFromApi(trigger, priceDecimals, sizeDecimals);
+  if (spec.triggerId !== undefined && normalized.triggerId !== undefined) {
+    return normalized.triggerId === spec.triggerId;
+  }
   return (
     normalized.marketId === spec.marketId &&
     normalized.side === spec.side &&
     normalized.kind === spec.kind &&
     normalized.triggerPrice === spec.triggerPrice &&
-    (normalized.limitPrice ?? undefined) === (spec.limitPrice ?? undefined) &&
-    (normalized.limitBaseSize ?? undefined) === (spec.limitBaseSize ?? undefined) &&
-    (normalized.limitQuoteSize ?? undefined) === (spec.limitQuoteSize ?? undefined)
+    (spec.limitPrice === undefined || (normalized.limitPrice ?? undefined) === spec.limitPrice) &&
+    (spec.limitBaseSize === undefined ||
+      (normalized.limitBaseSize ?? undefined) === spec.limitBaseSize) &&
+    (spec.limitQuoteSize === undefined ||
+      (normalized.limitQuoteSize ?? undefined) === spec.limitQuoteSize)
   );
 };
 

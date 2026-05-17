@@ -21,6 +21,7 @@ import {
   logInfo,
   logThrottle,
   logWarn,
+  roundMetric,
 } from "./logger";
 import {
   logSyncFromFetch,
@@ -34,19 +35,29 @@ import {
   buildEmaAtrTrail3mTickSnapshot,
   markStrategyReadyOnce,
 } from "./strategies/emaAtrTrail3mDiagnostics";
-import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
+import { evaluateEmaCrossoverAtrLiveStrategy } from "./strategies/emaCrossoverAtrLiveStrategy";
+import {
+  buildEmaCrossoverAtrLiveTickSnapshot,
+  markEmaCrossoverAtrLiveReadyOnce,
+} from "./strategies/emaCrossoverAtrLiveDiagnostics";
+import {
+  executeO1ClosePosition,
+  executeO1CrossoverEntry,
+  executeO1StopLossUpdate,
+} from "./strategyExecution";
+import {
+  CONSERVATIVE_EMA_STRATEGY_NAME,
+  EMA_ATR_TRAIL_3M_STRATEGY_NAME,
+  EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME,
+} from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
 import { getO1HistoryDiagnostics } from "./history";
 import { recordCrossoverFromStrategySkip } from "./history/recordFromStrategy";
-import {
-  mapExecutorReasonToCrossoverReason,
-  recordManagerCrossoverSkip,
-  recordManagerEntryEvent,
-} from "./history/recordEntryPath";
-import type { O1Candle, O1Diagnostics, O1EnvConfig, O1State } from "./types";
+import type { O1Candle, O1Diagnostics, O1EmaCrossoverAtrLiveParams, O1EnvConfig, O1State } from "./types";
 import { fetchActiveTriggers, triggersMatchSpec } from "./liveTestSupport";
 import { hydrateExistingPositionState, logManageOnlyMode } from "./positionHydration";
 import {
+  applyExitCooldown,
   clearPositionLinkedStrategyState,
   hasStalePositionStrategyState,
   logStrategyStateUpdate,
@@ -79,20 +90,6 @@ type O1BotEntry = {
   candleConnectedAt: number;
   lastPollIngestedTs: number | null;
   lastKnownPositionSize: number;
-};
-
-const clampEntrySizeToLimits = (
-  size: number,
-  entryPrice: number,
-  maxOrderNotional: number,
-  maxPositionSize: number,
-  sizeDecimals: number
-): number => {
-  if (!Number.isFinite(size) || size <= 0 || entryPrice <= 0) return 0;
-  const maxByNotional = maxOrderNotional / entryPrice;
-  const raw = Math.min(size, maxByNotional, maxPositionSize);
-  const factor = 10 ** sizeDecimals;
-  return Math.floor(raw * factor) / factor;
 };
 
 export class O1BotManager {
@@ -152,11 +149,25 @@ export class O1BotManager {
       effectiveCacheSize: state.candles.length,
     });
 
-    if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME && state.candles.length > 0) {
+    if (state.candles.length > 0) {
       const lastPreloadedTs = Number(state.candles[state.candles.length - 1]![0]);
-      const snapshot = buildEmaAtrTrail3mTickSnapshot(state, lastPreloadedTs, config.strategyParams);
-      markStrategyReadyOnce(state, snapshot);
-      seedStrategyDiagnosticsFromSnapshot(state, snapshot, lastPreloadedTs);
+      if (config.strategyName === EMA_ATR_TRAIL_3M_STRATEGY_NAME) {
+        const snapshot = buildEmaAtrTrail3mTickSnapshot(
+          state,
+          lastPreloadedTs,
+          config.strategyParams as import("./types").O1EmaAtrTrailStrategyParams
+        );
+        markStrategyReadyOnce(state, snapshot);
+        seedStrategyDiagnosticsFromSnapshot(state, snapshot, lastPreloadedTs);
+      } else if (config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME) {
+        const snapshot = buildEmaCrossoverAtrLiveTickSnapshot(
+          state,
+          lastPreloadedTs,
+          config.strategyParams as O1EmaCrossoverAtrLiveParams
+        );
+        markEmaCrossoverAtrLiveReadyOnce(state, snapshot);
+        seedStrategyDiagnosticsFromSnapshot(state, snapshot, lastPreloadedTs);
+      }
     }
 
     logManageOnlyMode(config.manageExistingPositionOnly);
@@ -414,6 +425,12 @@ export class O1BotManager {
       return;
     }
 
+    if (config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME) {
+      if (closedCandleTs === undefined) return;
+      await this.runEmaCrossoverAtrLiveStrategy(bot, closedCandleTs);
+      return;
+    }
+
     if (closedCandleTs !== undefined) return;
     if (state.lastSignalCandleTs === Number(state.candles[state.candles.length - 1]?.[0])) return;
 
@@ -451,6 +468,9 @@ export class O1BotManager {
   }
 
   private triggerSpecEquals(left: O1TriggerSpec, right: O1TriggerSpec): boolean {
+    if (left.triggerId !== undefined && right.triggerId !== undefined) {
+      return left.triggerId === right.triggerId;
+    }
     return (
       left.marketId === right.marketId &&
       left.side === right.side &&
@@ -492,6 +512,9 @@ export class O1BotManager {
 
     if (wasPosition !== 0 && isFlat) {
       clearPositionLinkedStrategyState(state);
+      if (bot.config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME) {
+        applyExitCooldown(state, (bot.config.strategyParams as O1EmaCrossoverAtrLiveParams).cooldownCandles);
+      }
       logInfo("O1_POSITION_CLEARED", "Position closed; cleared strategy position state", {
         previousPositionSize: wasPosition,
         positionSize: state.positionSize,
@@ -513,7 +536,8 @@ export class O1BotManager {
 
     await this.syncBotState(bot);
 
-    const warmupSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs, config.strategyParams);
+    const trailParams = config.strategyParams as import("./types").O1EmaAtrTrailStrategyParams;
+    const warmupSnapshot = buildEmaAtrTrail3mTickSnapshot(state, closedCandleTs, trailParams);
     markStrategyReadyOnce(state, warmupSnapshot);
 
     const action = evaluateEmaAtrTrail3mStrategy({
@@ -523,7 +547,7 @@ export class O1BotManager {
       maxPositionSize: config.maxPositionSize,
       priceDecimals: bot.priceDecimals,
       sizeDecimals: bot.sizeDecimals,
-      params: config.strategyParams,
+      params: trailParams,
     });
 
     logStrategyStateUpdate(state, closedCandleTs);
@@ -541,188 +565,19 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
-      const direction = action.type === "openLong" ? "long" : "short";
-      const snapshot = action.crossover;
-      const historyCtx = { state, config, candleHandling };
-
-      if (config.manageExistingPositionOnly) {
-        recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-other", {
-          block: "manage-existing-position-only",
-        });
-        logError("O1_STRATEGY_ERROR", "Entry blocked in manage-existing-position-only mode", {
-          side: action.type,
-          closedCandleTs,
-        });
-        return;
-      }
-      if (state.positionSize !== 0) {
-        recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-existing-position", {
-          positionSize: state.positionSize,
-        });
-        logDebug("O1_STRATEGY_SKIP", "Open blocked because a position is already open", {
-          positionSize: state.positionSize,
-          closedCandleTs,
-        });
-        return;
-      }
-
-      const entrySize = clampEntrySizeToLimits(
-        action.size,
-        action.entryPrice,
-        config.maxOrderNotional,
-        config.maxPositionSize,
-        bot.sizeDecimals
+      await executeO1CrossoverEntry(
+        {
+          state,
+          config,
+          candleHandling,
+          executor,
+          priceDecimals: bot.priceDecimals,
+          sizeDecimals: bot.sizeDecimals,
+          syncState: () => this.syncBotState(bot),
+        },
+        closedCandleTs,
+        action
       );
-      if (entrySize <= 0) {
-        recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-invalid-size", {
-          requestedSize: action.size,
-          entryPrice: action.entryPrice,
-          maxOrderNotional: config.maxOrderNotional,
-        });
-        logError("O1_STRATEGY_ERROR", "Entry size clamped to zero", {
-          requestedSize: action.size,
-          entryPrice: action.entryPrice,
-          maxOrderNotional: config.maxOrderNotional,
-        });
-        return;
-      }
-      logInfo("O1_ENTRY", "Executing entry", {
-        side: direction,
-        size: entrySize,
-        requestedSize: action.size,
-        entryPrice: action.entryPrice,
-        stopLoss: action.stopLoss,
-        dryRun: config.dryRun,
-      });
-
-      if (config.dryRun) {
-        const crossoverRecord = recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-dry-run", {
-          entrySize,
-        });
-        recordManagerEntryEvent(historyCtx, closedCandleTs, {
-          crossoverId: crossoverRecord?.id ?? null,
-          direction,
-          entryPrice: action.entryPrice,
-          size: entrySize,
-          stopLoss: action.stopLoss,
-          status: "attempted",
-          orderResult: "dry-run",
-        });
-      }
-
-      const openResult = action.type === "openLong"
-        ? await executor.openLong(entrySize)
-        : await executor.openShort(entrySize);
-      if (openResult.ok === false) {
-        const crossoverRecord = recordManagerCrossoverSkip(
-          historyCtx,
-          closedCandleTs,
-          snapshot,
-          mapExecutorReasonToCrossoverReason(openResult.reason),
-          { executorReason: openResult.reason }
-        );
-        recordManagerEntryEvent(historyCtx, closedCandleTs, {
-          crossoverId: crossoverRecord?.id ?? null,
-          direction,
-          entryPrice: action.entryPrice,
-          size: entrySize,
-          stopLoss: action.stopLoss,
-          status: "failed",
-          failureReason: openResult.reason,
-        });
-        logError("O1_STRATEGY_ERROR", "Entry order failed", {
-          side: action.type,
-          reason: openResult.reason,
-        });
-        return;
-      }
-
-      const orderData = openResult.data as { actionId?: string; orderId?: string } | undefined;
-      const orderResult = orderData?.actionId ?? orderData?.orderId ?? "ok";
-
-      await this.syncBotState(bot);
-      if (state.positionSize === 0) {
-        if (!config.dryRun) {
-          const crossoverRecord = recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-executor-error", {
-            note: "entry-ok-position-flat",
-          });
-          recordManagerEntryEvent(historyCtx, closedCandleTs, {
-            crossoverId: crossoverRecord?.id ?? null,
-            direction,
-            entryPrice: action.entryPrice,
-            size: entrySize,
-            stopLoss: action.stopLoss,
-            status: "failed",
-            failureReason: "position-still-flat-after-entry",
-            orderResult: String(orderResult),
-          });
-        }
-        logError("O1_STRATEGY_ERROR", "Entry reported success but position is still flat", {
-          side: action.type,
-          size: action.size,
-        });
-        return;
-      }
-
-      const crossoverRecord = config.dryRun
-        ? null
-        : recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "entered", { entrySize });
-
-      const stopSide = action.type === "openLong" ? Side.Ask : Side.Bid;
-      const stopSpec = state.strategy.activeStopLossSpec;
-      if (!stopSpec) {
-        recordManagerEntryEvent(historyCtx, closedCandleTs, {
-          crossoverId: crossoverRecord?.id ?? null,
-          direction,
-          entryPrice: action.entryPrice,
-          size: entrySize,
-          stopLoss: action.stopLoss,
-          status: "failed",
-          failureReason: "missing-stop-loss-spec",
-          orderResult: String(orderResult),
-        });
-        logError("O1_STRATEGY_ERROR", "Missing stop-loss spec after entry", { side: action.type });
-        await executor.closePosition();
-        return;
-      }
-
-      const stopSize = Math.abs(state.positionSize) > 0 ? Math.abs(state.positionSize) : entrySize;
-      const stopSpecForPosition = { ...stopSpec, limitBaseSize: stopSize };
-      logInfo("O1_SL", "Placing initial stop-loss", compactTriggerSpec(stopSpecForPosition));
-      if (!config.dryRun) {
-        const stopResult = await executor.placeStopLoss(stopSpec.triggerPrice, stopSide, stopSize);
-        if (stopResult.ok === false) {
-          recordManagerEntryEvent(historyCtx, closedCandleTs, {
-            crossoverId: crossoverRecord?.id ?? null,
-            direction,
-            entryPrice: action.entryPrice,
-            size: entrySize,
-            stopLoss: action.stopLoss,
-            status: "closed-by-safety",
-            failureReason: stopResult.reason,
-            orderResult: String(orderResult),
-            slTriggerResult: stopResult.reason,
-          });
-          logError("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position", {
-            reason: stopResult.reason,
-          });
-          await this.syncBotState(bot);
-          await executor.closePosition();
-          return;
-        }
-        recordManagerEntryEvent(historyCtx, closedCandleTs, {
-          crossoverId: crossoverRecord?.id ?? null,
-          direction,
-          entryPrice: action.entryPrice,
-          size: entrySize,
-          stopLoss: action.stopLoss,
-          status: "opened",
-          orderResult: String(orderResult),
-          slTriggerResult: "placed",
-        });
-      }
-
-      state.trailingActive = false;
       return;
     }
 
@@ -755,6 +610,84 @@ export class O1BotManager {
       }
 
       state.strategy.activeStopLossSpec = nextSpec;
+    }
+  }
+
+  private async runEmaCrossoverAtrLiveStrategy(bot: O1BotEntry, closedCandleTs: number): Promise<void> {
+    const { state, executor, config, candleHandling } = bot;
+    const params = config.strategyParams as O1EmaCrossoverAtrLiveParams;
+    const execCtx = {
+      state,
+      config,
+      candleHandling,
+      executor,
+      priceDecimals: bot.priceDecimals,
+      sizeDecimals: bot.sizeDecimals,
+      syncState: () => this.syncBotState(bot),
+    };
+
+    await this.syncBotState(bot);
+
+    const warmupSnapshot = buildEmaCrossoverAtrLiveTickSnapshot(state, closedCandleTs, params);
+    markEmaCrossoverAtrLiveReadyOnce(state, warmupSnapshot);
+
+    const action = evaluateEmaCrossoverAtrLiveStrategy({
+      state,
+      closedCandleTs,
+      marketId: config.marketId,
+      maxPositionSize: config.maxPositionSize,
+      maxOrderNotional: config.maxOrderNotional,
+      priceDecimals: bot.priceDecimals,
+      sizeDecimals: bot.sizeDecimals,
+      params,
+    });
+
+    const crossoverSnapshot =
+      action.type === "none" || action.type === "openLong" || action.type === "openShort"
+        ? action.crossover
+        : undefined;
+    if (crossoverSnapshot?.strengthDetails) {
+      const strengthDetails = crossoverSnapshot.strengthDetails;
+      logInfo("O1_STRENGTH_CALC", "Crossover strength calculated", {
+        direction: crossoverSnapshot.direction,
+        currentClose: roundMetric(strengthDetails.currentClose),
+        lookbackCount: strengthDetails.lookbackCloses.length,
+        selectedReferenceClose: roundMetric(strengthDetails.selectedReferenceClose),
+        selectedReferenceCandleTs: strengthDetails.selectedReferenceCandleTs,
+        strengthPct: roundMetric(strengthDetails.strengthPct),
+        formula: strengthDetails.formula,
+      });
+    }
+
+    logStrategyStateUpdate(state, closedCandleTs);
+    logStrategyTickFromState(state, candleHandling.effectiveResolution, closedCandleTs);
+
+    if (action.type === "none") {
+      if (action.crossover) {
+        recordCrossoverFromStrategySkip(bot, closedCandleTs, action.crossover, action.reason);
+      }
+      if (action.reason !== "position-open-managing" && action.reason !== "no-ema-cross") {
+        logInfo("O1_STRATEGY_SKIP", "No strategy action for closed candle", {
+          closedCandleTs,
+          reason: action.reason,
+        });
+      }
+      return;
+    }
+
+    if (action.type === "openLong" || action.type === "openShort") {
+      await executeO1CrossoverEntry(execCtx, closedCandleTs, action);
+      return;
+    }
+
+    if (action.type === "updateStopLoss") {
+      await executeO1StopLossUpdate(execCtx, action);
+      return;
+    }
+
+    if (action.type === "closePosition") {
+      await executeO1ClosePosition(execCtx, action.reason);
+      await this.syncBotState(bot);
     }
   }
 
@@ -906,6 +839,11 @@ export class O1BotManager {
       },
       strategy: state.strategy,
       history: getO1HistoryDiagnostics(),
+      poll: {
+        intervalMs: config.candlePollIntervalMs,
+        lastPollIngestedTs: bot.lastPollIngestedTs,
+        enabled: config.candlePollIntervalMs > 0,
+      },
     };
   }
 }
