@@ -36,6 +36,13 @@ import {
 } from "./strategies/emaAtrTrail3mDiagnostics";
 import { CONSERVATIVE_EMA_STRATEGY_NAME, EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
+import { getO1HistoryDiagnostics } from "./history";
+import { recordCrossoverFromStrategySkip } from "./history/recordFromStrategy";
+import {
+  mapExecutorReasonToCrossoverReason,
+  recordManagerCrossoverSkip,
+  recordManagerEntryEvent,
+} from "./history/recordEntryPath";
 import type { O1Candle, O1Diagnostics, O1EnvConfig, O1State } from "./types";
 import { fetchActiveTriggers, triggersMatchSpec } from "./liveTestSupport";
 import { hydrateExistingPositionState, logManageOnlyMode } from "./positionHydration";
@@ -523,6 +530,9 @@ export class O1BotManager {
     logStrategyTickFromState(state, candleHandling.effectiveResolution, closedCandleTs);
 
     if (action.type === "none") {
+      if (action.crossover) {
+        recordCrossoverFromStrategySkip(bot, closedCandleTs, action.crossover, action.reason);
+      }
       logInfo("O1_STRATEGY_SKIP", "No strategy action for closed candle", {
         closedCandleTs,
         reason: action.reason,
@@ -531,7 +541,14 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
+      const direction = action.type === "openLong" ? "long" : "short";
+      const snapshot = action.crossover;
+      const historyCtx = { state, config, candleHandling };
+
       if (config.manageExistingPositionOnly) {
+        recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-other", {
+          block: "manage-existing-position-only",
+        });
         logError("O1_STRATEGY_ERROR", "Entry blocked in manage-existing-position-only mode", {
           side: action.type,
           closedCandleTs,
@@ -539,6 +556,9 @@ export class O1BotManager {
         return;
       }
       if (state.positionSize !== 0) {
+        recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-existing-position", {
+          positionSize: state.positionSize,
+        });
         logDebug("O1_STRATEGY_SKIP", "Open blocked because a position is already open", {
           positionSize: state.positionSize,
           closedCandleTs,
@@ -554,6 +574,11 @@ export class O1BotManager {
         bot.sizeDecimals
       );
       if (entrySize <= 0) {
+        recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-invalid-size", {
+          requestedSize: action.size,
+          entryPrice: action.entryPrice,
+          maxOrderNotional: config.maxOrderNotional,
+        });
         logError("O1_STRATEGY_ERROR", "Entry size clamped to zero", {
           requestedSize: action.size,
           entryPrice: action.entryPrice,
@@ -561,9 +586,8 @@ export class O1BotManager {
         });
         return;
       }
-
       logInfo("O1_ENTRY", "Executing entry", {
-        side: action.type === "openLong" ? "long" : "short",
+        side: direction,
         size: entrySize,
         requestedSize: action.size,
         entryPrice: action.entryPrice,
@@ -571,10 +595,41 @@ export class O1BotManager {
         dryRun: config.dryRun,
       });
 
+      if (config.dryRun) {
+        const crossoverRecord = recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-dry-run", {
+          entrySize,
+        });
+        recordManagerEntryEvent(historyCtx, closedCandleTs, {
+          crossoverId: crossoverRecord?.id ?? null,
+          direction,
+          entryPrice: action.entryPrice,
+          size: entrySize,
+          stopLoss: action.stopLoss,
+          status: "attempted",
+          orderResult: "dry-run",
+        });
+      }
+
       const openResult = action.type === "openLong"
         ? await executor.openLong(entrySize)
         : await executor.openShort(entrySize);
       if (openResult.ok === false) {
+        const crossoverRecord = recordManagerCrossoverSkip(
+          historyCtx,
+          closedCandleTs,
+          snapshot,
+          mapExecutorReasonToCrossoverReason(openResult.reason),
+          { executorReason: openResult.reason }
+        );
+        recordManagerEntryEvent(historyCtx, closedCandleTs, {
+          crossoverId: crossoverRecord?.id ?? null,
+          direction,
+          entryPrice: action.entryPrice,
+          size: entrySize,
+          stopLoss: action.stopLoss,
+          status: "failed",
+          failureReason: openResult.reason,
+        });
         logError("O1_STRATEGY_ERROR", "Entry order failed", {
           side: action.type,
           reason: openResult.reason,
@@ -582,8 +637,26 @@ export class O1BotManager {
         return;
       }
 
+      const orderData = openResult.data as { actionId?: string; orderId?: string } | undefined;
+      const orderResult = orderData?.actionId ?? orderData?.orderId ?? "ok";
+
       await this.syncBotState(bot);
       if (state.positionSize === 0) {
+        if (!config.dryRun) {
+          const crossoverRecord = recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-executor-error", {
+            note: "entry-ok-position-flat",
+          });
+          recordManagerEntryEvent(historyCtx, closedCandleTs, {
+            crossoverId: crossoverRecord?.id ?? null,
+            direction,
+            entryPrice: action.entryPrice,
+            size: entrySize,
+            stopLoss: action.stopLoss,
+            status: "failed",
+            failureReason: "position-still-flat-after-entry",
+            orderResult: String(orderResult),
+          });
+        }
         logError("O1_STRATEGY_ERROR", "Entry reported success but position is still flat", {
           side: action.type,
           size: action.size,
@@ -591,9 +664,23 @@ export class O1BotManager {
         return;
       }
 
+      const crossoverRecord = config.dryRun
+        ? null
+        : recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "entered", { entrySize });
+
       const stopSide = action.type === "openLong" ? Side.Ask : Side.Bid;
       const stopSpec = state.strategy.activeStopLossSpec;
       if (!stopSpec) {
+        recordManagerEntryEvent(historyCtx, closedCandleTs, {
+          crossoverId: crossoverRecord?.id ?? null,
+          direction,
+          entryPrice: action.entryPrice,
+          size: entrySize,
+          stopLoss: action.stopLoss,
+          status: "failed",
+          failureReason: "missing-stop-loss-spec",
+          orderResult: String(orderResult),
+        });
         logError("O1_STRATEGY_ERROR", "Missing stop-loss spec after entry", { side: action.type });
         await executor.closePosition();
         return;
@@ -605,6 +692,17 @@ export class O1BotManager {
       if (!config.dryRun) {
         const stopResult = await executor.placeStopLoss(stopSpec.triggerPrice, stopSide, stopSize);
         if (stopResult.ok === false) {
+          recordManagerEntryEvent(historyCtx, closedCandleTs, {
+            crossoverId: crossoverRecord?.id ?? null,
+            direction,
+            entryPrice: action.entryPrice,
+            size: entrySize,
+            stopLoss: action.stopLoss,
+            status: "closed-by-safety",
+            failureReason: stopResult.reason,
+            orderResult: String(orderResult),
+            slTriggerResult: stopResult.reason,
+          });
           logError("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position", {
             reason: stopResult.reason,
           });
@@ -612,6 +710,16 @@ export class O1BotManager {
           await executor.closePosition();
           return;
         }
+        recordManagerEntryEvent(historyCtx, closedCandleTs, {
+          crossoverId: crossoverRecord?.id ?? null,
+          direction,
+          entryPrice: action.entryPrice,
+          size: entrySize,
+          stopLoss: action.stopLoss,
+          status: "opened",
+          orderResult: String(orderResult),
+          slTriggerResult: "placed",
+        });
       }
 
       state.trailingActive = false;
@@ -797,6 +905,7 @@ export class O1BotManager {
         cooldownMs: config.cooldownMs,
       },
       strategy: state.strategy,
+      history: getO1HistoryDiagnostics(),
     };
   }
 }

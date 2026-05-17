@@ -1,5 +1,13 @@
 import { Request, Response } from "express";
+import { listCrossovers, listEntries } from "../bot/exchanges/o1/history";
+import type { O1CrossoverDirection, O1CrossoverReason, O1EntryStatus } from "../bot/exchanges/o1/history/types";
 import { O1BotManager } from "../bot/exchanges/o1/manager";
+
+const parseLimit = (value: unknown): number | undefined => {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+};
 
 const o1BotManager = new O1BotManager();
 
@@ -32,6 +40,40 @@ export const stopO1BotController = async (req: Request, res: Response) => {
     return res.status(200).json({ message: "O1 bot stopped" });
   } catch (err) {
     return res.status(500).json({ error: "Failed to stop O1 bot", details: serializeError(err) });
+  }
+};
+
+export const getO1CrossoversController = async (req: Request, res: Response) => {
+  const enabled = process.env.O1_ENABLED === "true";
+  const limit = parseLimit(req.query.limit);
+  const direction = typeof req.query.direction === "string"
+    ? req.query.direction as O1CrossoverDirection
+    : undefined;
+  const reason = typeof req.query.reason === "string"
+    ? req.query.reason as O1CrossoverReason
+    : undefined;
+  try {
+    const crossovers = listCrossovers({ limit, direction, reason });
+    return res.status(200).json({ enabled, count: crossovers.length, crossovers });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch O1 crossovers", details: serializeError(err) });
+  }
+};
+
+export const getO1EntriesController = async (req: Request, res: Response) => {
+  const enabled = process.env.O1_ENABLED === "true";
+  const limit = parseLimit(req.query.limit);
+  const direction = typeof req.query.direction === "string"
+    ? req.query.direction as O1CrossoverDirection
+    : undefined;
+  const status = typeof req.query.status === "string"
+    ? req.query.status as O1EntryStatus
+    : undefined;
+  try {
+    const entries = listEntries({ limit, direction, status });
+    return res.status(200).json({ enabled, count: entries.length, entries });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch O1 entries", details: serializeError(err) });
   }
 };
 

@@ -1,4 +1,5 @@
 import type { CandleResolution, FillMode, Side, TriggerKind } from "@n1xyz/nord-ts";
+import type { O1HistoryDiagnostics } from "./history/types";
 import type { O1StrategyDiagnostics } from "./strategies/types";
 
 export type O1Candle = [
@@ -223,4 +224,5 @@ export type O1Diagnostics = {
     cooldownMs: number;
   };
   strategy: O1StrategyDiagnostics;
+  history: O1HistoryDiagnostics;
 };

@@ -4,8 +4,19 @@ import { logError, logInfo, roundMetric } from "../logger";
 import type { O1Candle, O1EmaAtrTrailStrategyParams, O1State, O1TriggerSpec } from "../types";
 import { EMA_ATR_TRAIL_3M_STRATEGY_NAME } from "./types";
 
+export type O1CrossoverSnapshot = {
+  direction: "long" | "short";
+  close: number;
+  emaShort: number;
+  emaLong: number;
+  atr: number;
+  strengthPct: number | null;
+  calculatedSize?: number;
+  stopLoss?: number;
+};
+
 export type EmaAtrTrail3mAction =
-  | { type: "none"; reason: string }
+  | { type: "none"; reason: string; crossover?: O1CrossoverSnapshot }
   | {
       type: "openLong";
       size: number;
@@ -15,6 +26,7 @@ export type EmaAtrTrail3mAction =
       strengthPct: number;
       ema7: number;
       ema25: number;
+      crossover?: O1CrossoverSnapshot;
     }
   | {
       type: "openShort";
@@ -25,6 +37,7 @@ export type EmaAtrTrail3mAction =
       strengthPct: number;
       ema7: number;
       ema25: number;
+      crossover?: O1CrossoverSnapshot;
     }
   | {
       type: "updateTrailStop";
@@ -226,6 +239,19 @@ export const evaluateEmaAtrTrail3mStrategy = ({
 
   const crossedLong = prevEma7 <= prevEma25 && ema7 > ema25;
   const crossedShort = prevEma7 >= prevEma25 && ema7 < ema25;
+  const buildCrossoverSnapshot = (
+    direction: "long" | "short",
+    strengthPctValue: number | null,
+    extras?: { calculatedSize?: number; stopLoss?: number }
+  ): O1CrossoverSnapshot => ({
+    direction,
+    close,
+    emaShort: ema7,
+    emaLong: ema25,
+    atr,
+    strengthPct: strengthPctValue,
+    ...extras,
+  });
   if (!crossedLong && !crossedShort) {
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "no-ema-cross";
@@ -239,6 +265,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
   const side = crossedLong ? "long" : "short";
   const strengthPct = getStrengthPct(side, closes, params);
   diagnostics.lastStrengthPct = strengthPct;
+  const crossoverBase = buildCrossoverSnapshot(side, strengthPct);
 
   if (strengthPct === null || strengthPct < params.strengthConfirmationPct) {
     diagnostics.lastSignal = "none";
@@ -248,7 +275,7 @@ export const evaluateEmaAtrTrail3mStrategy = ({
       strengthPct: roundMetric(strengthPct),
       required: params.strengthConfirmationPct,
     });
-    return { type: "none", reason: diagnostics.lastSignalReason };
+    return { type: "none", reason: diagnostics.lastSignalReason, crossover: crossoverBase };
   }
 
   const entryPrice = close;
@@ -267,7 +294,11 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     diagnostics.lastSignal = "none";
     diagnostics.lastSignalReason = "invalid-position-size";
     logError("O1_STRATEGY_ERROR", "Computed position size is invalid", { size, entryPrice, atr });
-    return { type: "none", reason: diagnostics.lastSignalReason };
+    return {
+      type: "none",
+      reason: diagnostics.lastSignalReason,
+      crossover: buildCrossoverSnapshot(side, strengthPct, { calculatedSize: size }),
+    };
   }
 
   const stopLoss = crossedLong
@@ -295,13 +326,35 @@ export const evaluateEmaAtrTrail3mStrategy = ({
     side,
   });
 
+  const crossoverSignal = buildCrossoverSnapshot(side, strengthPct, { calculatedSize: size, stopLoss });
+
   if (crossedLong) {
     diagnostics.lastSignal = "open-long";
     diagnostics.lastSignalReason = "ema-cross-long";
-    return { type: "openLong", size, entryPrice, stopLoss, atr, strengthPct, ema7, ema25 };
+    return {
+      type: "openLong",
+      size,
+      entryPrice,
+      stopLoss,
+      atr,
+      strengthPct,
+      ema7,
+      ema25,
+      crossover: crossoverSignal,
+    };
   }
 
   diagnostics.lastSignal = "open-short";
   diagnostics.lastSignalReason = "ema-cross-short";
-  return { type: "openShort", size, entryPrice, stopLoss, atr, strengthPct, ema7, ema25 };
+  return {
+    type: "openShort",
+    size,
+    entryPrice,
+    stopLoss,
+    atr,
+    strengthPct,
+    ema7,
+    ema25,
+    crossover: crossoverSignal,
+  };
 };
