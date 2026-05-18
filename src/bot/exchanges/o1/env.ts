@@ -69,6 +69,7 @@ export const readO1Env = (): O1EnvConfig => {
     enabled: asBool(process.env.O1_ENABLED, false),
     dryRun: asBool(process.env.O1_DRY_RUN, true),
     emergencyStop: asBool(process.env.O1_EMERGENCY_STOP, false),
+    blockNewEntries: asBool(process.env.O1_BLOCK_NEW_ENTRIES, false) || asBool(process.env.O1_SAFE_MODE, false),
     privateKey: process.env.O1_PRIVATE_KEY ?? "",
     appKey: process.env.O1_APP_KEY ?? "",
     solanaRpcUrl: process.env.O1_SOLANA_RPC_URL ?? "",

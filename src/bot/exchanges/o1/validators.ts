@@ -10,6 +10,9 @@ export const validatePreTrade = (
 ): O1Result => {
   if (!config.enabled) return { ok: false, reason: "O1 bot disabled by env flag." };
   if (state.emergencyStop) return { ok: false, reason: "Emergency stop enabled." };
+  if (state.blockNewEntries && !params.isReduceOnly) {
+    return { ok: false, reason: "New entries blocked (safe mode)." };
+  }
   if (!Number.isFinite(params.marketId) || params.marketId < 0) return { ok: false, reason: "Invalid marketId." };
   if (!Object.values(Side).includes(params.side)) return { ok: false, reason: "Invalid side." };
   if (!Object.values(FillMode).includes(params.fillMode)) return { ok: false, reason: "Invalid fillMode." };

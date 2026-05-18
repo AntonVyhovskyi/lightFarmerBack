@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { listCrossovers, listEntries } from "../bot/exchanges/o1/history";
 import type { O1CrossoverDirection, O1CrossoverReason, O1EntryStatus } from "../bot/exchanges/o1/history/types";
 import { O1BotManager } from "../bot/exchanges/o1/manager";
+import { sanitizeForApi } from "../bot/exchanges/o1/logger";
 
 const parseLimit = (value: unknown): number | undefined => {
   if (value === undefined || value === null || value === "") return undefined;
@@ -33,13 +34,23 @@ export const startO1BotController = async (_req: Request, res: Response) => {
 };
 
 export const stopO1BotController = async (req: Request, res: Response) => {
+  const enabled = process.env.O1_ENABLED === "true";
   const { botId } = req.body as { botId?: string };
-  if (!botId) return res.status(400).json({ error: "botId is required" });
   try {
-    await o1BotManager.stop(botId);
-    return res.status(200).json({ message: "O1 bot stopped" });
+    const result = await o1BotManager.safeStop(botId);
+    return res.status(200).json({
+      enabled,
+      message: result.stopped ? "O1 bot stopped" : "O1 bot stop completed with errors",
+      ...result,
+    });
   } catch (err) {
-    return res.status(500).json({ error: "Failed to stop O1 bot", details: serializeError(err) });
+    return res.status(200).json({
+      enabled,
+      stopped: false,
+      cleanupErrors: [serializeError(err)],
+      remainingBots: await o1BotManager.getBots().catch(() => []),
+      details: serializeError(err),
+    });
   }
 };
 
@@ -92,10 +103,19 @@ export const getO1DiagnosticsController = async (req: Request, res: Response) =>
   const botId = typeof req.params.botId === "string" ? req.params.botId : req.params.botId?.[0];
   if (!botId) return res.status(400).json({ error: "botId is required" });
   try {
-    const diagnostics = o1BotManager.getDiagnostics(botId);
-    return res.status(200).json({ enabled, diagnostics });
+    const { diagnostics, diagnosticsError } = await o1BotManager.getSafeDiagnostics(botId);
+    return res.status(200).json({
+      enabled,
+      diagnostics,
+      ...(diagnosticsError ? { diagnosticsError } : {}),
+    });
   } catch (err) {
-    return res.status(500).json({ error: "Failed to fetch O1 diagnostics", details: serializeError(err) });
+    return res.status(200).json({
+      enabled,
+      diagnostics: null,
+      diagnosticsError: err instanceof Error ? err.message : String(err),
+      details: sanitizeForApi(serializeError(err)),
+    });
   }
 };
 
@@ -115,8 +135,21 @@ export const setO1EmergencyStopController = async (req: Request, res: Response) 
   if (!botId || enabled === undefined) return res.status(400).json({ error: "botId and enabled are required" });
   try {
     o1BotManager.setEmergencyStop(botId, Boolean(enabled));
-    return res.status(200).json({ message: "Emergency stop updated", botId, enabled: Boolean(enabled) });
+    if (Boolean(enabled)) {
+      o1BotManager.setBlockNewEntries(botId, true);
+    }
+    return res.status(200).json({
+      message: "Emergency stop updated",
+      botId,
+      enabled: Boolean(enabled),
+      blockNewEntries: Boolean(enabled),
+    });
   } catch (err) {
-    return res.status(500).json({ error: "Failed to update emergency stop", details: serializeError(err) });
+    return res.status(200).json({
+      message: "Emergency stop update failed",
+      botId,
+      enabled: Boolean(enabled),
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 };

@@ -57,6 +57,8 @@ const serializeError = (error: Error): Record<string, unknown> => {
   return payload;
 };
 
+export const sanitizeForApi = (value: unknown): unknown => sanitizeValue(value, 0);
+
 const sanitizeValue = (value: unknown, depth: number): unknown => {
   if (value === undefined) return undefined;
   if (value === null) return null;

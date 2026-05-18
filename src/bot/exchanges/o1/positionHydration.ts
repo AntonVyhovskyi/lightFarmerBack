@@ -1,5 +1,5 @@
 import type { Nord } from "@n1xyz/nord-ts";
-import { fetchActiveTriggers, toTriggerSpecFromApi } from "./liveTestSupport";
+import { fetchActiveTriggers, filterMarketTriggersByKind, toTriggerSpecFromApi } from "./liveTestSupport";
 import { logInfo, logWarn, roundMetric } from "./logger";
 import type { O1EnvConfig, O1State } from "./types";
 
@@ -24,18 +24,16 @@ export const hydrateExistingPositionState = async ({
   }
 
   const triggers = await fetchActiveTriggers(nord, config.accountId);
-  const slTriggers = triggers.filter(
-    (trigger) => trigger.marketId === config.marketId && trigger.kind === "stopLoss"
-  );
+  const slTriggers = filterMarketTriggersByKind(triggers, config.marketId, "stopLoss");
 
-  if (slTriggers.length !== 1) {
-    return {
-      ok: false,
-      reason: `Expected exactly one stop-loss trigger, found ${slTriggers.length}.`,
-    };
+  if (slTriggers.length === 0) {
+    return { ok: false, reason: "No stop-loss trigger found on exchange for open position." };
   }
 
-  const spec = toTriggerSpecFromApi(slTriggers[0]!, priceDecimals, sizeDecimals);
+  const slRow = slTriggers.reduce((latest, row) =>
+    Number(row.triggerId) > Number(latest.triggerId) ? row : latest
+  );
+  const spec = toTriggerSpecFromApi(slRow, priceDecimals, sizeDecimals);
   state.strategy.activeStopLossSpec = spec;
   state.strategy.currentStopLoss = spec.triggerPrice;
   state.strategy.lastEntryPrice = state.entryPrice > 0 ? state.entryPrice : null;

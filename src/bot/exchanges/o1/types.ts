@@ -57,6 +57,7 @@ export type O1EnvConfig = {
   enabled: boolean;
   dryRun: boolean;
   emergencyStop: boolean;
+  blockNewEntries: boolean;
   privateKey: string;
   appKey: string;
   solanaRpcUrl: string;
@@ -139,6 +140,7 @@ export type O1State = {
   pendingClientOrderIds: Set<number>;
   ws: O1WsStatuses;
   emergencyStop: boolean;
+  blockNewEntries: boolean;
   dailyRealizedPnl: number;
   candlePreloaded: boolean;
   preloadedCandleCount: number;
@@ -243,6 +245,7 @@ export type O1Diagnostics = {
   };
   safety: {
     emergencyStop: boolean;
+    blockNewEntries: boolean;
     dryRun: boolean;
     pendingOrders: number;
     cooldownMs: number;

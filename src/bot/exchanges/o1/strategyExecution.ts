@@ -8,7 +8,8 @@ import {
   recordManagerEntryEvent,
 } from "./history/recordEntryPath";
 import type { O1CrossoverSnapshot } from "./strategies/emaAtrTrail3mStrategy";
-import { roundToDecimals } from "./liveTestSupport";
+import type { Nord } from "@n1xyz/nord-ts";
+import { roundToDecimals, verifyExchangeStopLoss } from "./liveTestSupport";
 import type { O1EmaCrossoverAtrLiveParams, O1EnvConfig, O1State } from "./types";
 
 const ensureStopLossOnCorrectSide = (
@@ -47,6 +48,7 @@ export type O1OpenAction = {
 type BotCtx = {
   state: O1State;
   config: O1EnvConfig;
+  nord: Nord;
   candleHandling: O1CandleHandling;
   executor: O1Executor;
   priceDecimals: number;
@@ -78,6 +80,16 @@ export const executeO1CrossoverEntry = async (
   const snapshot = action.crossover;
   const historyCtx = { state, config, candleHandling };
 
+  if (state.blockNewEntries || state.emergencyStop) {
+    recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-other", {
+      block: state.blockNewEntries ? "block-new-entries" : "emergency-stop",
+    });
+    logError("O1_STRATEGY_ERROR", "Entry blocked by safe mode", {
+      blockNewEntries: state.blockNewEntries,
+      emergencyStop: state.emergencyStop,
+    });
+    return;
+  }
   if (config.manageExistingPositionOnly) {
     recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-other", {
       block: "manage-existing-position-only",
@@ -270,10 +282,48 @@ export const executeO1CrossoverEntry = async (
       logError("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position", {
         reason: stopResult.reason,
       });
+      state.blockNewEntries = true;
       await bot.syncState();
       await executor.closePosition();
       return;
     }
+
+    const slVerify = await verifyExchangeStopLoss({
+      nord: bot.nord,
+      accountId: config.accountId!,
+      marketId: config.marketId,
+      expectedSpec: state.strategy.activeStopLossSpec,
+      priceDecimals: bot.priceDecimals,
+      sizeDecimals: bot.sizeDecimals,
+    });
+    if (!slVerify.ok || !state.strategy.activeStopLossSpec?.triggerId) {
+      recordManagerEntryEvent(historyCtx, closedCandleTs, {
+        crossoverId: crossoverRecord?.id ?? null,
+        direction,
+        entryPrice: action.entryPrice,
+        size: entrySize,
+        stopLoss: adjustedTrigger,
+        status: "closed-by-safety",
+        failureReason: "sl-exchange-verification-failed",
+        orderResult: String(orderResult),
+        slTriggerResult: "verification-failed",
+      });
+      logError("O1_STRATEGY_ERROR", "SL not confirmed on exchange; closing and blocking entries", {
+        slVerify,
+        triggerId: state.strategy.activeStopLossSpec?.triggerId?.toString(),
+      });
+      state.blockNewEntries = true;
+      await bot.syncState();
+      await executor.closePosition();
+      return;
+    }
+    if (slVerify.matchedTriggerId && state.strategy.activeStopLossSpec) {
+      state.strategy.activeStopLossSpec = {
+        ...state.strategy.activeStopLossSpec,
+        triggerId: BigInt(slVerify.matchedTriggerId),
+      };
+    }
+
     recordManagerEntryEvent(historyCtx, closedCandleTs, {
       crossoverId: crossoverRecord?.id ?? null,
       direction,

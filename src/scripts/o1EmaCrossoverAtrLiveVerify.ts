@@ -35,6 +35,7 @@ import { O1Executor } from "../bot/exchanges/o1/executor";
 import { listCrossovers, listEntries } from "../bot/exchanges/o1/history";
 import {
   fetchActiveTriggers,
+  filterMarketTriggersByKind,
   sleep,
   summarizeTrigger,
   syncO1StateFromUser,
@@ -289,8 +290,7 @@ async function main(): Promise<void> {
       });
       const { nord, user, state, priceDecimals, sizeDecimals, triggers } = snapshot;
       const marketTriggers = triggers.filter((t) => t.marketId === config.marketId);
-      slSummaries = marketTriggers
-        .filter((t) => t.kind === "stopLoss")
+      slSummaries = filterMarketTriggersByKind(marketTriggers, config.marketId, "stopLoss")
         .map((t) => summarizeTrigger(t, priceDecimals, sizeDecimals));
       if (slSummaries.length >= 1 && Math.abs(state.positionSize) > 0) {
         console.log("[O1_LIVE_VERIFY] SL confirmed on exchange", { slCount: slSummaries.length, slSummaries });
@@ -367,8 +367,7 @@ async function main(): Promise<void> {
         return { nord, user, state, priceDecimals, sizeDecimals, triggers };
       });
       const { state, priceDecimals, sizeDecimals, triggers } = snapshot;
-      const slTriggers = triggers
-        .filter((t) => t.marketId === config.marketId && t.kind === "stopLoss")
+      const slTriggers = filterMarketTriggersByKind(triggers, config.marketId, "stopLoss")
         .map((t) => summarizeTrigger(t, priceDecimals, sizeDecimals));
 
       if (seenTags.has("O1_BE") || seenTags.has("O1_TRAIL")) {

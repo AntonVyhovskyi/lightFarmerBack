@@ -1,4 +1,4 @@
-import type { WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
+import type { Nord, WebSocketAccountUpdate, WebSocketTradeUpdate } from "@n1xyz/nord-ts";
 import { Side } from "@n1xyz/nord-ts";
 import { preloadO1Candles } from "./candlePreload";
 import {
@@ -11,7 +11,8 @@ import { detectClosed3mBucketMs, mergeLive1mIntoEffective3mCache } from "./candl
 import { detectDirectClosedCandleTs } from "./candleDirect";
 import { pollRecentCandles } from "./candlePoll";
 import { upsertCandle } from "./candleCache";
-import { getInitializedO1Client, initO1Client, resetO1Client } from "./client";
+import { initO1Client, resetO1Client } from "./client";
+import { sanitizeForApi } from "./logger";
 import { O1Executor } from "./executor";
 import {
   compactCandleDiagnostics,
@@ -54,7 +55,14 @@ import { getO1ConservativeEmaSignal } from "./strategyAdapter";
 import { getO1HistoryDiagnostics } from "./history";
 import { recordCrossoverFromStrategySkip } from "./history/recordFromStrategy";
 import type { O1Candle, O1Diagnostics, O1EmaCrossoverAtrLiveParams, O1EnvConfig, O1State } from "./types";
-import { fetchActiveTriggers, triggersMatchSpec } from "./liveTestSupport";
+import {
+  fetchActiveTriggers,
+  filterMarketTriggersByKind,
+  summarizeTrigger,
+  syncO1StateFromUser,
+  toTriggerSpecFromApi,
+  triggersMatchSpec,
+} from "./liveTestSupport";
 import { hydrateExistingPositionState, logManageOnlyMode } from "./positionHydration";
 import {
   applyExitCooldown,
@@ -67,10 +75,18 @@ import {
 import { createO1WsStreams, type O1WsHandle } from "./ws";
 import type { O1TriggerSpec } from "./types";
 
+export type O1StopResult = {
+  stopped: boolean;
+  botId: string;
+  cleanupErrors: string[];
+  remainingBots: string[];
+};
+
 type O1BotEntry = {
   id: string;
   state: O1State;
-  stop: () => Promise<void>;
+  nord: Nord;
+  stop: () => Promise<O1StopResult>;
   executor: O1Executor;
   user: Awaited<ReturnType<typeof initO1Client>>["user"];
   pubkey: string;
@@ -174,6 +190,17 @@ export class O1BotManager {
     if (config.manageExistingPositionOnly && state.positionSize === 0) {
       throw new Error("O1_MANAGE_EXISTING_POSITION_ONLY=true but no open position exists.");
     }
+    if (config.blockNewEntries || config.emergencyStop) {
+      state.blockNewEntries = true;
+      state.emergencyStop = state.emergencyStop || config.emergencyStop;
+    }
+    if (state.positionSize !== 0) {
+      state.blockNewEntries = true;
+      logWarn("O1_SAFE_MODE", "Open position detected at start — new entries blocked", {
+        positionSize: state.positionSize,
+      });
+    }
+
     if (state.positionSize !== 0) {
       const hydrated = await hydrateExistingPositionState({
         state,
@@ -183,7 +210,10 @@ export class O1BotManager {
         sizeDecimals,
       });
       if (!hydrated.ok) {
-        throw new Error(`Failed to hydrate existing position: ${hydrated.reason}`);
+        logWarn("O1_HYDRATE", "Could not hydrate SL from exchange — entries remain blocked", {
+          reason: hydrated.reason,
+          positionSize: state.positionSize,
+        });
       }
     }
 
@@ -370,20 +400,54 @@ export class O1BotManager {
       await this.reconcilePositionLifecycle(botEntry);
     }, Math.max(5000, Math.floor(config.wsStaleMs / 2)));
 
-    const stop = async () => {
-      if (candlePayloadWatchdog) clearTimeout(candlePayloadWatchdog);
-      if (candlePollTimer) clearInterval(candlePollTimer);
-      wsHandle.stop();
-      if (this.bots.get(botId)?.heartbeatTimer) clearInterval(this.bots.get(botId)!.heartbeatTimer);
-      if (this.bots.get(botId)?.reconnectTimer) clearTimeout(this.bots.get(botId)!.reconnectTimer);
+    const stop = async (): Promise<O1StopResult> => {
+      const cleanupErrors: string[] = [];
+      const runStep = async (label: string, fn: () => void | Promise<void>) => {
+        try {
+          await fn();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          cleanupErrors.push(`${label}: ${message}`);
+          logWarn("O1_STOP", "Cleanup step failed", { label, message });
+        }
+      };
+
+      await runStep("candlePayloadWatchdog", () => {
+        if (candlePayloadWatchdog) clearTimeout(candlePayloadWatchdog);
+      });
+      await runStep("candlePollTimer", () => {
+        if (candlePollTimer) clearInterval(candlePollTimer);
+      });
+      await runStep("wsHandle", () => wsHandle.stop());
+      const entry = this.bots.get(botId);
+      await runStep("heartbeatTimer", () => {
+        if (entry?.heartbeatTimer) clearInterval(entry.heartbeatTimer);
+      });
+      await runStep("reconnectTimer", () => {
+        if (entry?.reconnectTimer) clearTimeout(entry.reconnectTimer);
+      });
+
+      state.blockNewEntries = true;
+      state.emergencyStop = true;
       this.bots.delete(botId);
-      resetO1Client();
-      logInfo("O1_STOP", "Stopped O1 bot");
+
+      await runStep("resetO1Client", () => {
+        resetO1Client();
+      });
+
+      logInfo("O1_STOP", "Stopped O1 bot", { botId, cleanupErrors });
+      return {
+        stopped: true,
+        botId,
+        cleanupErrors,
+        remainingBots: Array.from(this.bots.keys()),
+      };
     };
 
     this.bots.set(botId, {
       id: botId,
       state,
+      nord,
       stop,
       executor,
       user,
@@ -487,8 +551,7 @@ export class O1BotManager {
     const ownedSpecs = this.collectBotOwnedTriggerSpecs(bot);
     if (ownedSpecs.length === 0) return;
 
-    const { nord } = getInitializedO1Client();
-    const triggers = await fetchActiveTriggers(nord, bot.config.accountId);
+    const triggers = await fetchActiveTriggers(bot.nord, bot.config.accountId);
     const marketTriggers = triggers.filter((t) => t.marketId === bot.config.marketId);
 
     for (const owned of ownedSpecs) {
@@ -565,10 +628,17 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
+      if (state.blockNewEntries || state.emergencyStop) {
+        logWarn("O1_STRATEGY_SKIP", "Entry signal ignored — safe mode active", {
+          signal: action.type,
+        });
+        return;
+      }
       await executeO1CrossoverEntry(
         {
           state,
           config,
+          nord: bot.nord,
           candleHandling,
           executor,
           priceDecimals: bot.priceDecimals,
@@ -676,7 +746,15 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
-      await executeO1CrossoverEntry(execCtx, closedCandleTs, action);
+      if (state.blockNewEntries || state.emergencyStop) {
+        logWarn("O1_STRATEGY_SKIP", "Entry signal ignored — safe mode active", {
+          signal: action.type,
+          blockNewEntries: state.blockNewEntries,
+          emergencyStop: state.emergencyStop,
+        });
+        return;
+      }
+      await executeO1CrossoverEntry({ ...execCtx, nord: bot.nord }, closedCandleTs, action);
       return;
     }
 
@@ -755,10 +833,48 @@ export class O1BotManager {
     logSyncFromFetch(accountId, state);
   }
 
-  async stop(botId: string): Promise<void> {
+  async stop(botId: string): Promise<O1StopResult> {
     const bot = this.bots.get(botId);
-    if (!bot) throw new Error(`O1 bot ${botId} not found.`);
-    await bot.stop();
+    if (!bot) {
+      return {
+        stopped: false,
+        botId,
+        cleanupErrors: [`O1 bot ${botId} not found.`],
+        remainingBots: Array.from(this.bots.keys()),
+      };
+    }
+    return bot.stop();
+  }
+
+  async safeStop(botId?: string): Promise<O1StopResult> {
+    if (!botId) {
+      const ids = Array.from(this.bots.keys());
+      if (ids.length === 0) {
+        return { stopped: true, botId: "", cleanupErrors: [], remainingBots: [] };
+      }
+      const results: O1StopResult[] = [];
+      for (const id of ids) {
+        results.push(await this.safeStop(id));
+      }
+      return {
+        stopped: results.every((r) => r.stopped),
+        botId: ids.join(","),
+        cleanupErrors: results.flatMap((r) => r.cleanupErrors),
+        remainingBots: Array.from(this.bots.keys()),
+      };
+    }
+    try {
+      return await this.stop(botId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.bots.delete(botId);
+      return {
+        stopped: false,
+        botId,
+        cleanupErrors: [message],
+        remainingBots: Array.from(this.bots.keys()),
+      };
+    }
   }
 
   async getBots(): Promise<string[]> {
@@ -775,6 +891,14 @@ export class O1BotManager {
     const bot = this.bots.get(botId);
     if (!bot) throw new Error(`O1 bot ${botId} not found.`);
     bot.state.emergencyStop = enabled;
+    if (enabled) bot.state.blockNewEntries = true;
+  }
+
+  setBlockNewEntries(botId: string, enabled: boolean): void {
+    const bot = this.bots.get(botId);
+    if (!bot) throw new Error(`O1 bot ${botId} not found.`);
+    bot.state.blockNewEntries = enabled;
+    if (enabled) bot.state.emergencyStop = true;
   }
 
   getDiagnostics(botId: string): O1Diagnostics {
@@ -833,6 +957,7 @@ export class O1BotManager {
       },
       safety: {
         emergencyStop: state.emergencyStop,
+        blockNewEntries: state.blockNewEntries,
         dryRun: config.dryRun,
         pendingOrders: state.pendingClientOrderIds.size,
         cooldownMs: config.cooldownMs,
@@ -845,5 +970,129 @@ export class O1BotManager {
         enabled: config.candlePollIntervalMs > 0,
       },
     };
+  }
+
+  private async fetchExchangeDiagnostics(botId: string): Promise<Record<string, unknown>> {
+    const { config, nord, user } = await initO1Client();
+    const expectedBotId = `o1-${config.symbol}-${config.resolution}`;
+    await user.fetchInfo();
+    const info = await nord.getInfo();
+    const market = info.markets.find(
+      (entry) => entry.marketId === config.marketId || entry.symbol === config.symbol
+    );
+    const priceDecimals = market?.priceDecimals ?? 2;
+    const sizeDecimals = market?.sizeDecimals ?? 4;
+    const snapshot = createInitialO1State(config);
+    syncO1StateFromUser(snapshot, user, config.accountId!, config.marketId);
+    const triggers = config.accountId
+      ? await fetchActiveTriggers(nord, config.accountId)
+      : [];
+    const marketTriggers = triggers.filter((row) => row.marketId === config.marketId);
+    const slTriggers = filterMarketTriggersByKind(triggers, config.marketId, "stopLoss");
+    const slSummaries = slTriggers.map((row) => summarizeTrigger(row, priceDecimals, sizeDecimals));
+    const newestSl = slTriggers.length
+      ? slTriggers.reduce((latest, row) =>
+          Number(row.triggerId) > Number(latest.triggerId) ? row : latest
+        )
+      : null;
+    const activeStopLossSpec = newestSl
+      ? sanitizeForApi(toTriggerSpecFromApi(newestSl, priceDecimals, sizeDecimals))
+      : null;
+    return {
+      botRunning: false,
+      botId,
+      expectedBotId,
+      botIdMatchesEnv: botId === expectedBotId,
+      account: {
+        accountId: config.accountId,
+        balanceTotal: snapshot.balanceTotal,
+        balanceAvailable: snapshot.balanceAvailable,
+        positionSize: snapshot.positionSize,
+        entryPrice: snapshot.entryPrice,
+        openOrders: snapshot.orders.length,
+      },
+      exchange: {
+        activeTriggers: marketTriggers.length,
+        slCount: slTriggers.length,
+        triggerIds: marketTriggers.map((row) => String(row.triggerId)),
+        slTriggerIds: slTriggers.map((row) => String(row.triggerId)),
+        triggerSummaries: slSummaries,
+        activeStopLossSpec,
+        currentStopLoss: activeStopLossSpec
+          ? (activeStopLossSpec as { triggerPrice?: number }).triggerPrice ?? null
+          : null,
+      },
+      safety: {
+        emergencyStop: config.emergencyStop,
+        blockNewEntries: config.blockNewEntries,
+        dryRun: config.dryRun,
+      },
+    };
+  }
+
+  async getSafeDiagnostics(
+    botId: string
+  ): Promise<{ diagnostics: O1Diagnostics | Record<string, unknown>; diagnosticsError?: string }> {
+    const bot = this.bots.get(botId);
+    if (!bot) {
+      try {
+        const exchange = await this.fetchExchangeDiagnostics(botId);
+        return {
+          diagnostics: sanitizeForApi(exchange) as O1Diagnostics,
+          diagnosticsError: `O1 bot ${botId} is not running; exchange snapshot only.`,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          diagnostics: { botId, botRunning: false },
+          diagnosticsError: message,
+        };
+      }
+    }
+
+    try {
+      const diagnostics = this.getDiagnostics(botId);
+      const triggers = bot.config.accountId
+        ? await fetchActiveTriggers(bot.nord, bot.config.accountId)
+        : [];
+      const slTriggers = filterMarketTriggersByKind(triggers, bot.config.marketId, "stopLoss");
+      const slSummaries = slTriggers.map((row) =>
+        summarizeTrigger(row, bot.priceDecimals, bot.sizeDecimals)
+      );
+      const enriched = {
+        ...diagnostics,
+        exchange: {
+          activeTriggers: triggers.filter((row) => row.marketId === bot.config.marketId).length,
+          slCount: slTriggers.length,
+          triggerIds: triggers
+            .filter((row) => row.marketId === bot.config.marketId)
+            .map((row) => String(row.triggerId)),
+          slTriggerIds: slTriggers.map((row) => String(row.triggerId)),
+          triggerSummaries: slSummaries,
+        },
+      };
+      return { diagnostics: sanitizeForApi(enriched) as O1Diagnostics };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const partial = {
+        botId,
+        botRunning: true,
+        error: message,
+        account: {
+          positionSize: bot.state.positionSize,
+          entryPrice: bot.state.entryPrice,
+          openOrders: bot.state.orders.length,
+        },
+        strategy: sanitizeForApi(bot.state.strategy),
+        safety: {
+          emergencyStop: bot.state.emergencyStop,
+          blockNewEntries: bot.state.blockNewEntries,
+        },
+      };
+      return {
+        diagnostics: partial as unknown as O1Diagnostics,
+        diagnosticsError: message,
+      };
+    }
   }
 }

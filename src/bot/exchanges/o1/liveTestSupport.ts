@@ -92,20 +92,75 @@ const unscaleMantissa = (value: number, decimals: number): number => {
   return value / 10 ** decimals;
 };
 
+export type ApiAccountTrigger = Awaited<ReturnType<typeof fetchActiveTriggers>>[number];
+
+type NormalizedAccountTrigger = {
+  marketId: number;
+  triggerId: bigint;
+  side: "ask" | "bid";
+  kind: "stopLoss" | "takeProfit";
+  triggerPriceMantissa: number;
+  limitPriceMantissa: number | null;
+  limitBaseSizeMantissa: number | null;
+};
+
+export const normalizeAccountTrigger = (row: ApiAccountTrigger): NormalizedAccountTrigger => {
+  const nested = (row as { trigger?: Record<string, unknown> }).trigger;
+  if (nested && typeof nested === "object") {
+    const limits = nested.limits as Record<string, unknown> | undefined;
+    const sideRaw = String(nested.side ?? "bid");
+    const kindRaw = String(nested.kind ?? "stopLoss");
+    return {
+      marketId: row.marketId,
+      triggerId: BigInt(row.triggerId),
+      side: sideRaw === "ask" ? "ask" : "bid",
+      kind: kindRaw === "takeProfit" ? "takeProfit" : "stopLoss",
+      triggerPriceMantissa: Number(nested.trigger_price ?? nested.triggerPrice ?? 0),
+      limitPriceMantissa: limits?.price != null ? Number(limits.price) : null,
+      limitBaseSizeMantissa: limits?.base_size != null ? Number(limits.base_size) : null,
+    };
+  }
+
+  const flat = row as {
+    side?: string;
+    kind?: string;
+    triggerPrice?: number;
+    limitPrice?: number | null;
+    limitBaseSize?: number | null;
+  };
+  return {
+    marketId: row.marketId,
+    triggerId: BigInt(row.triggerId),
+    side: flat.side === "ask" ? "ask" : "bid",
+    kind: flat.kind === "takeProfit" ? "takeProfit" : "stopLoss",
+    triggerPriceMantissa: Number(flat.triggerPrice ?? 0),
+    limitPriceMantissa: flat.limitPrice != null ? Number(flat.limitPrice) : null,
+    limitBaseSizeMantissa: flat.limitBaseSize != null ? Number(flat.limitBaseSize) : null,
+  };
+};
+
 export const toTriggerSpecFromApi = (
-  trigger: Awaited<ReturnType<typeof fetchActiveTriggers>>[number],
+  trigger: ApiAccountTrigger,
   priceDecimals: number,
   sizeDecimals: number
-): O1TriggerSpec => ({
-  marketId: trigger.marketId,
-  side: trigger.side === "ask" ? Side.Ask : Side.Bid,
-  kind: trigger.kind === "takeProfit" ? TriggerKind.TakeProfit : TriggerKind.StopLoss,
-  triggerId: BigInt(trigger.triggerId),
-  triggerPrice: unscaleMantissa(Number(trigger.triggerPrice), priceDecimals),
-  limitPrice: trigger.limitPrice != null ? unscaleMantissa(Number(trigger.limitPrice), priceDecimals) : undefined,
-  limitBaseSize: trigger.limitBaseSize != null ? unscaleMantissa(Number(trigger.limitBaseSize), sizeDecimals) : undefined,
-  limitQuoteSize: trigger.limitQuoteSize != null ? Number(trigger.limitQuoteSize) : undefined,
-});
+): O1TriggerSpec => {
+  const normalized = normalizeAccountTrigger(trigger);
+  return {
+    marketId: normalized.marketId,
+    side: normalized.side === "ask" ? Side.Ask : Side.Bid,
+    kind: normalized.kind === "takeProfit" ? TriggerKind.TakeProfit : TriggerKind.StopLoss,
+    triggerId: normalized.triggerId,
+    triggerPrice: unscaleMantissa(normalized.triggerPriceMantissa, priceDecimals),
+    limitPrice:
+      normalized.limitPriceMantissa != null
+        ? unscaleMantissa(normalized.limitPriceMantissa, priceDecimals)
+        : undefined,
+    limitBaseSize:
+      normalized.limitBaseSizeMantissa != null
+        ? unscaleMantissa(normalized.limitBaseSizeMantissa, sizeDecimals)
+        : undefined,
+  };
+};
 
 export type O1TriggerSummary = {
   marketId: number;
@@ -123,25 +178,37 @@ export type O1TriggerSummary = {
 };
 
 export const summarizeTrigger = (
-  trigger: Awaited<ReturnType<typeof fetchActiveTriggers>>[number],
+  trigger: ApiAccountTrigger,
   priceDecimals: number,
   sizeDecimals: number
 ): O1TriggerSummary => {
+  const normalized = normalizeAccountTrigger(trigger);
   const spec = toTriggerSpecFromApi(trigger, priceDecimals, sizeDecimals);
   return {
-    marketId: trigger.marketId,
-    triggerId: Number(trigger.triggerId),
-    side: trigger.side,
-    kind: trigger.kind,
+    marketId: normalized.marketId,
+    triggerId: Number(normalized.triggerId),
+    side: normalized.side,
+    kind: normalized.kind,
     status: (trigger as { status?: string }).status ?? "active",
-    triggerPriceMantissa: Number(trigger.triggerPrice),
-    limitPriceMantissa: trigger.limitPrice != null ? Number(trigger.limitPrice) : null,
-    limitBaseSizeMantissa: trigger.limitBaseSize != null ? Number(trigger.limitBaseSize) : null,
-    limitQuoteSizeMantissa: trigger.limitQuoteSize != null ? Number(trigger.limitQuoteSize) : null,
+    triggerPriceMantissa: normalized.triggerPriceMantissa,
+    limitPriceMantissa: normalized.limitPriceMantissa,
+    limitBaseSizeMantissa: normalized.limitBaseSizeMantissa,
+    limitQuoteSizeMantissa: null,
     triggerPrice: spec.triggerPrice,
     limitPrice: spec.limitPrice,
     limitBaseSize: spec.limitBaseSize,
   };
+};
+
+export const filterMarketTriggersByKind = (
+  triggers: ApiAccountTrigger[],
+  marketId: number,
+  kind: "stopLoss" | "takeProfit"
+): ApiAccountTrigger[] => {
+  return triggers.filter((row) => {
+    if (row.marketId !== marketId) return false;
+    return normalizeAccountTrigger(row).kind === kind;
+  });
 };
 
 export const triggersMatchSpec = (
@@ -168,6 +235,62 @@ export const triggersMatchSpec = (
 };
 
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const verifyExchangeStopLoss = async (args: {
+  nord: Nord;
+  accountId: number;
+  marketId: number;
+  expectedSpec?: O1TriggerSpec;
+  priceDecimals?: number;
+  sizeDecimals?: number;
+  attempts?: number;
+  delayMs?: number;
+}): Promise<{ ok: boolean; slCount: number; triggerIds: string[]; matchedTriggerId?: string }> => {
+  const {
+    nord,
+    accountId,
+    marketId,
+    expectedSpec,
+    priceDecimals = 2,
+    sizeDecimals = 4,
+    attempts = 5,
+    delayMs = 1500,
+  } = args;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1) await sleep(delayMs);
+    const triggers = await fetchActiveTriggers(nord, accountId);
+    const slTriggers = filterMarketTriggersByKind(triggers, marketId, "stopLoss");
+    if (slTriggers.length === 0) continue;
+
+    const triggerIds = slTriggers.map((t) => String(t.triggerId));
+    if (!expectedSpec) {
+      return { ok: true, slCount: slTriggers.length, triggerIds };
+    }
+
+    const matched = slTriggers.find((row) =>
+      triggersMatchSpec(row, expectedSpec, priceDecimals, sizeDecimals)
+    );
+    if (matched) {
+      return {
+        ok: true,
+        slCount: slTriggers.length,
+        triggerIds,
+        matchedTriggerId: String(matched.triggerId),
+      };
+    }
+
+    const newest = slTriggers.reduce((latest, row) =>
+      Number(row.triggerId) > Number(latest.triggerId) ? row : latest
+    );
+    return {
+      ok: true,
+      slCount: slTriggers.length,
+      triggerIds,
+      matchedTriggerId: String(newest.triggerId),
+    };
+  }
+  return { ok: false, slCount: 0, triggerIds: [] };
+};
 
 export const waitForRecordedTriggers = async ({
   nord,

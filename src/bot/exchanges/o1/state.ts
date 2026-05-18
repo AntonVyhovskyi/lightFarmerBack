@@ -29,6 +29,7 @@ export const createInitialO1State = (config: O1EnvConfig): O1State => ({
     lastFallbackSyncAt: 0,
   },
   emergencyStop: config.emergencyStop,
+  blockNewEntries: config.blockNewEntries,
   dailyRealizedPnl: 0,
   candlePreloaded: false,
   preloadedCandleCount: 0,

@@ -14,6 +14,13 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err instanceof SyntaxError && "body" in err) {
+    return res.status(200).json({ ok: false, error: "Invalid JSON body", message: err.message });
+  }
+  next(err);
+});
+
 app.use("/api", routes)
 
 
