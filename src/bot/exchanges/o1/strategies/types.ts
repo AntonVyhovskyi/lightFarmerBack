@@ -24,6 +24,8 @@ export type O1StrategyDiagnostics = {
   tradesTodayCount: number;
   lastTradeDayUtc: string | null;
   entryCandleTs: number | null;
+  pendingEntryProtection: boolean;
+  lastStopGuardSource: string | null;
 };
 
 export const createInitialO1StrategyDiagnostics = (): O1StrategyDiagnostics => ({
@@ -46,4 +48,6 @@ export const createInitialO1StrategyDiagnostics = (): O1StrategyDiagnostics => (
   tradesTodayCount: 0,
   lastTradeDayUtc: null,
   entryCandleTs: null,
+  pendingEntryProtection: false,
+  lastStopGuardSource: null,
 });

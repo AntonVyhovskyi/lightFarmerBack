@@ -267,6 +267,18 @@ export const verifyExchangeStopLoss = async (args: {
       return { ok: true, slCount: slTriggers.length, triggerIds };
     }
 
+    if (expectedSpec.triggerId !== undefined) {
+      const byId = slTriggers.find((row) => BigInt(row.triggerId) === expectedSpec.triggerId);
+      if (byId) {
+        return {
+          ok: true,
+          slCount: slTriggers.length,
+          triggerIds,
+          matchedTriggerId: String(byId.triggerId),
+        };
+      }
+    }
+
     const matched = slTriggers.find((row) =>
       triggersMatchSpec(row, expectedSpec, priceDecimals, sizeDecimals)
     );
@@ -279,15 +291,7 @@ export const verifyExchangeStopLoss = async (args: {
       };
     }
 
-    const newest = slTriggers.reduce((latest, row) =>
-      Number(row.triggerId) > Number(latest.triggerId) ? row : latest
-    );
-    return {
-      ok: true,
-      slCount: slTriggers.length,
-      triggerIds,
-      matchedTriggerId: String(newest.triggerId),
-    };
+    return { ok: false, slCount: slTriggers.length, triggerIds };
   }
   return { ok: false, slCount: 0, triggerIds: [] };
 };

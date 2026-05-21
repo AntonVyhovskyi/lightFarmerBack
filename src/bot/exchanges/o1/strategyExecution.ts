@@ -9,7 +9,13 @@ import {
 } from "./history/recordEntryPath";
 import type { O1CrossoverSnapshot } from "./strategies/emaAtrTrail3mStrategy";
 import type { Nord } from "@n1xyz/nord-ts";
-import { roundToDecimals, verifyExchangeStopLoss } from "./liveTestSupport";
+import { roundToDecimals } from "./liveTestSupport";
+import {
+  ensureProtectiveStopLoss,
+  logStopGuard,
+  waitForPositionConfirmation,
+  type StopGuardContext,
+} from "./stopLossGuard";
 import type { O1EmaCrossoverAtrLiveParams, O1EnvConfig, O1State } from "./types";
 
 const ensureStopLossOnCorrectSide = (
@@ -179,27 +185,36 @@ export const executeO1CrossoverEntry = async (
   const orderData = openResult.data as { actionId?: string; orderId?: string } | undefined;
   const orderResult = orderData?.actionId ?? orderData?.orderId ?? "ok";
 
-  await bot.syncState();
-  if (state.positionSize === 0) {
+  logStopGuard("POSITION_OPENED", bot as StopGuardContext, {
+    orderId: orderResult,
+    requestedSize: entrySize,
+    entryPrice: action.entryPrice,
+    stopLoss: action.stopLoss,
+  });
+
+  const positionWait = await waitForPositionConfirmation(bot as StopGuardContext, {
+    orderId: String(orderResult),
+  });
+
+  if (!positionWait.confirmed) {
+    state.strategy.pendingEntryProtection = true;
+    logError("O1_STRATEGY_ERROR", "Entry submitted but position not confirmed yet; stop guard will retry", {
+      side: action.type,
+      orderResult,
+      attempts: positionWait.attempts,
+    });
     if (!config.dryRun) {
-      recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-executor-error", {
-        note: "entry-ok-position-flat",
-      });
       recordManagerEntryEvent(historyCtx, closedCandleTs, {
         crossoverId: null,
         direction,
         entryPrice: action.entryPrice,
         size: entrySize,
         stopLoss: action.stopLoss,
-        status: "failed",
-        failureReason: "position-still-flat-after-entry",
+        status: "attempted",
+        failureReason: "position-not-confirmed-yet",
         orderResult: String(orderResult),
       });
     }
-    logError("O1_STRATEGY_ERROR", "Entry reported success but position is still flat", {
-      side: action.type,
-      size: action.size,
-    });
     return;
   }
 
@@ -256,47 +271,12 @@ export const executeO1CrossoverEntry = async (
   state.strategy.currentStopLoss = adjustedTrigger;
   logInfo("O1_SL", "Placing initial stop-loss", compactTriggerSpec(stopSpecForPosition));
   if (!config.dryRun) {
-    const stopResult = await executor.placeInitialStopLoss(
-      stopSpecForPosition,
-      bot.priceDecimals,
-      bot.sizeDecimals
-    );
-    if (stopResult.ok && stopResult.data?.triggerId) {
-      state.strategy.activeStopLossSpec = {
-        ...stopSpecForPosition,
-        triggerId: BigInt(stopResult.data.triggerId),
-      };
-    }
-    if (stopResult.ok === false) {
-      recordManagerEntryEvent(historyCtx, closedCandleTs, {
-        crossoverId: crossoverRecord?.id ?? null,
-        direction,
-        entryPrice: action.entryPrice,
-        size: entrySize,
-        stopLoss: action.stopLoss,
-        status: "closed-by-safety",
-        failureReason: stopResult.reason,
-        orderResult: String(orderResult),
-        slTriggerResult: stopResult.reason,
-      });
-      logError("O1_STRATEGY_ERROR", "Initial stop-loss placement failed; closing position", {
-        reason: stopResult.reason,
-      });
-      state.blockNewEntries = true;
-      await bot.syncState();
-      await executor.closePosition();
-      return;
-    }
-
-    const slVerify = await verifyExchangeStopLoss({
-      nord: bot.nord,
-      accountId: config.accountId!,
-      marketId: config.marketId,
-      expectedSpec: state.strategy.activeStopLossSpec,
-      priceDecimals: bot.priceDecimals,
-      sizeDecimals: bot.sizeDecimals,
+    const guardResult = await ensureProtectiveStopLoss(bot as StopGuardContext, "post-entry", {
+      skipDebounce: true,
+      force: true,
     });
-    if (!slVerify.ok || !state.strategy.activeStopLossSpec?.triggerId) {
+
+    if (guardResult.status === "closed") {
       recordManagerEntryEvent(historyCtx, closedCandleTs, {
         crossoverId: crossoverRecord?.id ?? null,
         direction,
@@ -304,24 +284,25 @@ export const executeO1CrossoverEntry = async (
         size: entrySize,
         stopLoss: adjustedTrigger,
         status: "closed-by-safety",
-        failureReason: "sl-exchange-verification-failed",
+        failureReason: guardResult.reason,
         orderResult: String(orderResult),
-        slTriggerResult: "verification-failed",
+        slTriggerResult: guardResult.reason,
       });
-      logError("O1_STRATEGY_ERROR", "SL not confirmed on exchange; closing and blocking entries", {
-        slVerify,
-        triggerId: state.strategy.activeStopLossSpec?.triggerId?.toString(),
-      });
-      state.blockNewEntries = true;
-      await bot.syncState();
-      await executor.closePosition();
       return;
     }
-    if (slVerify.matchedTriggerId && state.strategy.activeStopLossSpec) {
-      state.strategy.activeStopLossSpec = {
-        ...state.strategy.activeStopLossSpec,
-        triggerId: BigInt(slVerify.matchedTriggerId),
-      };
+
+    if (guardResult.status === "skipped") {
+      recordManagerEntryEvent(historyCtx, closedCandleTs, {
+        crossoverId: crossoverRecord?.id ?? null,
+        direction,
+        entryPrice: action.entryPrice,
+        size: entrySize,
+        stopLoss: adjustedTrigger,
+        status: "failed",
+        failureReason: `stop-guard-skipped:${guardResult.reason}`,
+        orderResult: String(orderResult),
+      });
+      return;
     }
 
     recordManagerEntryEvent(historyCtx, closedCandleTs, {
@@ -332,7 +313,7 @@ export const executeO1CrossoverEntry = async (
       stopLoss: adjustedTrigger,
       status: "opened",
       orderResult: String(orderResult),
-      slTriggerResult: "placed",
+      slTriggerResult: guardResult.status === "recreated" ? "recreated" : "placed",
     });
   }
 

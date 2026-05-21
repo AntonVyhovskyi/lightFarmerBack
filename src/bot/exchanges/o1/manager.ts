@@ -64,6 +64,7 @@ import {
   triggersMatchSpec,
 } from "./liveTestSupport";
 import { hydrateExistingPositionState, logManageOnlyMode } from "./positionHydration";
+import { ensureProtectiveStopLoss, type StopGuardContext } from "./stopLossGuard";
 import {
   applyExitCooldown,
   clearPositionLinkedStrategyState,
@@ -110,6 +111,8 @@ type O1BotEntry = {
 
 export class O1BotManager {
   private bots = new Map<string, O1BotEntry>();
+  private stopGuardInFlight = new Set<string>();
+  private stopGuardTimers = new Map<string, NodeJS.Timeout>();
 
   async start(): Promise<string> {
     if (this.bots.size > 0) throw new Error("An O1 bot is already running.");
@@ -210,10 +213,14 @@ export class O1BotManager {
         sizeDecimals,
       });
       if (!hydrated.ok) {
-        logWarn("O1_HYDRATE", "Could not hydrate SL from exchange — entries remain blocked", {
+        logWarn("O1_HYDRATE", "Could not hydrate SL from exchange — running stop guard", {
           reason: hydrated.reason,
           positionSize: state.positionSize,
         });
+        const guardCtx = this.buildStopGuardContext(botId, nord, user, state, executor, config, priceDecimals, sizeDecimals);
+        if (guardCtx) {
+          await ensureProtectiveStopLoss(guardCtx, "startup-hydrate", { skipDebounce: true, force: true });
+        }
       }
     }
 
@@ -232,6 +239,12 @@ export class O1BotManager {
       bot.reconnectTimer = setTimeout(() => {
         bot.wsHandle?.stop();
         bot.wsHandle?.start();
+        void (async () => {
+          await bot.executor.syncAccount();
+          this.syncStateFromUser(bot.state, bot.user, bot.config.marketId, bot.config.accountId!);
+          await this.reconcilePositionLifecycle(bot);
+          await this.runStopLossGuard(botId, "ws-reconnect", { force: true });
+        })();
       }, delay);
     };
 
@@ -349,6 +362,14 @@ export class O1BotManager {
       onCandle: (candle) => handleLiveCandle(candle, "ws"),
       onAccount: (payload) => {
         this.handleAccountUpdate(state, payload, config.marketId);
+        void this.runStopLossGuard(botId, "account-ws");
+      },
+      onAccountConnected: () => {
+        void (async () => {
+          await executor.syncAccount();
+          this.syncStateFromUser(state, user, config.marketId, config.accountId!);
+          await this.runStopLossGuard(botId, "account-ws-connected", { force: true });
+        })();
       },
       onTrade: (payload) => {
         this.handleTradeUpdate(state, payload);
@@ -366,6 +387,10 @@ export class O1BotManager {
       streamResolution: candleHandling.streamResolution,
       effectiveResolution: candleHandling.effectiveResolution,
     });
+
+    const stopGuardWatchdog = setInterval(() => {
+      void this.runStopLossGuard(botId, "watchdog");
+    }, 20_000);
 
     const fallbackSyncIntervalMs = Math.max(30_000, config.wsStaleMs);
     const heartbeatTimer = setInterval(async () => {
@@ -398,6 +423,7 @@ export class O1BotManager {
       }
       this.syncStateFromUser(state, user, config.marketId, config.accountId!);
       await this.reconcilePositionLifecycle(botEntry);
+      await this.runStopLossGuard(botId, "heartbeat-fallback");
     }, Math.max(5000, Math.floor(config.wsStaleMs / 2)));
 
     const stop = async (): Promise<O1StopResult> => {
@@ -417,6 +443,11 @@ export class O1BotManager {
       });
       await runStep("candlePollTimer", () => {
         if (candlePollTimer) clearInterval(candlePollTimer);
+      });
+      await runStep("stopGuardWatchdog", () => {
+        const timer = this.stopGuardTimers.get(botId);
+        if (timer) clearInterval(timer);
+        this.stopGuardTimers.delete(botId);
       });
       await runStep("wsHandle", () => wsHandle.stop());
       const entry = this.bots.get(botId);
@@ -443,6 +474,8 @@ export class O1BotManager {
         remainingBots: Array.from(this.bots.keys()),
       };
     };
+
+    this.stopGuardTimers.set(botId, stopGuardWatchdog);
 
     this.bots.set(botId, {
       id: botId,
@@ -568,10 +601,83 @@ export class O1BotManager {
     }
   }
 
+  private buildStopGuardContext(
+    botId: string,
+    nord: Nord,
+    user: O1BotEntry["user"],
+    state: O1State,
+    executor: O1Executor,
+    config: O1EnvConfig,
+    priceDecimals: number,
+    sizeDecimals: number
+  ): StopGuardContext | null {
+    if (!config.accountId) return null;
+    return {
+      state,
+      config,
+      nord,
+      executor,
+      priceDecimals,
+      sizeDecimals,
+      syncState: async () => {
+        await executor.syncAccount();
+        this.syncStateFromUser(state, user, config.marketId, config.accountId!);
+      },
+    };
+  }
+
+  private async runStopLossGuard(
+    botId: string,
+    source: string,
+    options?: { force?: boolean }
+  ): Promise<void> {
+    const bot = this.bots.get(botId);
+    if (!bot || bot.config.dryRun) return;
+    if (bot.state.positionSize === 0 && !bot.state.strategy.pendingEntryProtection) return;
+    if (this.stopGuardInFlight.has(botId)) return;
+
+    const ctx = this.buildStopGuardContext(
+      botId,
+      bot.nord,
+      bot.user,
+      bot.state,
+      bot.executor,
+      bot.config,
+      bot.priceDecimals,
+      bot.sizeDecimals
+    );
+    if (!ctx) return;
+
+    this.stopGuardInFlight.add(botId);
+    bot.state.strategy.lastStopGuardSource = source;
+    try {
+      if (bot.state.positionSize === 0 && bot.state.strategy.pendingEntryProtection) {
+        await ctx.syncState();
+      }
+      if (ctx.state.positionSize === 0) return;
+      await ensureProtectiveStopLoss(ctx, source, {
+        force: options?.force ?? bot.state.strategy.pendingEntryProtection,
+        skipDebounce: options?.force ?? bot.state.strategy.pendingEntryProtection,
+      });
+    } finally {
+      this.stopGuardInFlight.delete(botId);
+    }
+  }
+
   private async reconcilePositionLifecycle(bot: O1BotEntry): Promise<void> {
     const { state } = bot;
     const wasPosition = bot.lastKnownPositionSize;
     const isFlat = state.positionSize === 0;
+
+    if (wasPosition === 0 && !isFlat) {
+      logInfo("O1_POSITION_OPENED", "Position detected on account sync", {
+        positionSize: state.positionSize,
+        entryPrice: state.entryPrice,
+      });
+      await this.runStopLossGuard(bot.id, "position-opened", { force: true });
+    } else if (!isFlat) {
+      await this.runStopLossGuard(bot.id, "reconcile");
+    }
 
     if (wasPosition !== 0 && isFlat) {
       clearPositionLinkedStrategyState(state);
@@ -961,6 +1067,9 @@ export class O1BotManager {
         dryRun: config.dryRun,
         pendingOrders: state.pendingClientOrderIds.size,
         cooldownMs: config.cooldownMs,
+        pendingEntryProtection: state.strategy.pendingEntryProtection,
+        lastStopGuardAt: state.lastStopGuardAt,
+        lastStopGuardSource: state.strategy.lastStopGuardSource,
       },
       strategy: state.strategy,
       history: getO1HistoryDiagnostics(),

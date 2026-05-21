@@ -147,6 +147,7 @@ export type O1State = {
   accountWsHasPayload: boolean;
   accountStateSource: "fetchInfo" | "websocket";
   strategy: O1StrategyDiagnostics;
+  lastStopGuardAt: number;
 };
 
 export type O1PlaceOrderRequest = {

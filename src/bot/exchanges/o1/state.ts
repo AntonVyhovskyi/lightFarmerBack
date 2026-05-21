@@ -36,4 +36,5 @@ export const createInitialO1State = (config: O1EnvConfig): O1State => ({
   accountWsHasPayload: false,
   accountStateSource: "fetchInfo",
   strategy: createInitialO1StrategyDiagnostics(),
+  lastStopGuardAt: 0,
 });

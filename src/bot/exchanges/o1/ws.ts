@@ -16,6 +16,7 @@ export const createO1WsStreams = ({
   onCandle,
   onCandleConnected,
   onAccount,
+  onAccountConnected,
   onTrade,
   onDisconnected,
 }: {
@@ -25,6 +26,7 @@ export const createO1WsStreams = ({
   onCandle: (candle: O1State["candles"][number], raw: unknown) => void;
   onCandleConnected?: () => void;
   onAccount: (payload: WebSocketAccountUpdate) => void;
+  onAccountConnected?: () => void;
   onTrade: (payload: WebSocketTradeUpdate) => void;
   onDisconnected: () => void;
 }): O1WsHandle => {
@@ -115,6 +117,7 @@ export const createO1WsStreams = ({
       state.ws.lastAccountConnectAt = now;
       state.ws.lastAccountUpdateAt = now;
       logInfo("O1_WS", "Account stream connected", { connectedAt: now });
+      onAccountConnected?.();
     });
     accountWs.on("account", (payload) => {
       const now = Date.now();
