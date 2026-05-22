@@ -1,6 +1,12 @@
 ﻿export type O1CrossoverDirection = "long" | "short";
 
 export type O1CrossoverReason =
+  | "signal_found"
+  | "filters_passed"
+  | "order_attempted"
+  | "order_accepted"
+  | "position_confirmed"
+  | "entered_confirmed"
   | "entered"
   | "skipped-strength-too-low"
   | "skipped-existing-position"
@@ -65,4 +71,6 @@ export type O1HistoryDiagnostics = {
   entryCacheSize: number;
   lastCrossover: O1CrossoverRecord | null;
   lastEntry: O1EntryRecord | null;
+  rejectionCounters: import("./rejectionCounters").O1RejectionCounters;
+  runtimeCrossoverNote: string;
 };

@@ -1,0 +1,150 @@
+﻿node.exe : bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+строка:1 знак:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Users\vygov\AppData\Roaming\ ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (bigint: Failed ...m run rebuild?):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[dotenv@17.2.3] injecting env (39) from .env -- tip: тЪЩя╕П  enable debug logging with { debug: true }
+[O1_START] Initializing O1 bot {"symbol":"SOLUSD","resolution":"1","strategy":"emaCrossoverAtrLiveStrategy","dryRun":false,"marketId":2}
+[O1_CANDLE_PRELOAD] Historical candles loaded {"resolution":"1","preloadedCandleCount":500,"candleMode":"direct"}
+{
+  "diagnostics": {
+    "botRunning": false,
+    "botId": "o1-SOLUSD-1",
+    "expectedBotId": "o1-SOLUSD-1",
+    "botIdMatchesEnv": true,
+    "crossoverAnalysis": {
+      "strategyName": "emaCrossoverAtrLiveStrategy",
+      "symbol": "SOLUSD",
+      "resolution": "1",
+      "candleMode": "direct",
+      "emaShortPeriod": 12,
+      "emaLongPeriod": 24,
+      "atrPeriod": 14,
+      "strengthLookbackCandles": 5,
+      "candlesLoaded": 500,
+      "firstCandleTs": 1779383040000,
+      "lastCandleTs": 1779417960000,
+      "scannedCandleCount": 500,
+      "warmupSkippedCount": 25,
+      "totalCrosses": 10,
+      "longCrosses": 5,
+      "shortCrosses": 5,
+      "last20CrossoverCandidates": [
+        {
+          "candleTs": 1779386700000,
+          "close": 87.33,
+          "direction": "short",
+          "prevEmaShort": 87.533641776541,
+          "prevEmaLong": 87.5200254656233,
+          "emaShort": 87.50231227245777,
+          "emaLong": 87.50482342837344,
+          "atr": 0.10704390217677111,
+          "strengthPct": 0.366426
+        },
+        {
+          "candleTs": 1779387720000,
+          "close": 87.58,
+          "direction": "long",
+          "prevEmaShort": 87.45915723384302,
+          "prevEmaLong": 87.46020331155704,
+          "emaShort": 87.4777484286364,
+          "emaLong": 87.46978704663248,
+          "atr": 0.06721199486602185,
+          "strengthPct": 0.251199
+        },
+        {
+          "candleTs": 1779389160000,
+          "close": 87.43,
+          "direction": "short",
+          "prevEmaShort": 87.50928831975865,
+          "prevEmaLong": 87.50841794105274,
+          "emaShort": 87.49709011671887,
+          "emaLong": 87.50214450576853,
+          "atr": 0.05418301316305912,
+          "strengthPct": 0.137253
+        },
+        {
+          "candleTs": 1779390540000,
+          "close": 87.38,
+          "direction": "long",
+          "prevEmaShort": 87.14445094272706,
+          "prevEmaLong": 87.15883766066884,
+          "emaShort": 87.18068925923059,
+          "emaLong": 87.17653064781533,
+          "atr": 0.08265356135617974,
+          "strengthPct": 0.286107
+        },
+        {
+          "candleTs": 1779395280000,
+          "close": 87.61,
+          "direction": "short",
+          "prevEmaShort": 87.68680348459398,
+          "prevEmaLong": 87.68353340204867,
+          "emaShort": 87.67498756388721,
+          "emaLong": 87.67765072988477,
+          "atr": 0.04810579572226619,
+          "strengthPct": 0.114142
+        },
+        {
+          "candleTs": 1779406500000,
+          "close": 87.18,
+          "direction": "long",
+          "prevEmaShort": 87.07282118387312,
+          "prevEmaLong": 87.08051317882367,
+          "emaShort": 87.08931023250803,
+          "emaLong": 87.08847212451778,
+          "atr": 0.04165503401843739,
+          "strengthPct": 0.172058
+        },
+        {
+          "candleTs": 1779408300000,
+          "close": 87.09,
+          "direction": "short",
+          "prevEmaShort": 87.16673621415889,
+          "prevEmaLong": 87.16606700658751,
+          "emaShort": 87.15493064274983,
+          "emaLong": 87.15998164606052,
+          "atr": 0.051281765055047675,
+          "strengthPct": 0.137788
+        },
+        {
+          "candleTs": 1779414360000,
+          "close": 86.85,
+          "direction": "long",
+          "prevEmaShort": 86.69675544453347,
+          "prevEmaLong": 86.70682768208184,
+          "emaShort": 86.72033152998985,
+          "emaLong": 86.71828146751528,
+          "atr": 0.043030966686600586,
+          "strengthPct": 0.241796
+        },
+        "[+2 more]"
+      ]
+    },
+    "account": {
+      "accountId": 23119,
+      "balanceTotal": 94.525471,
+      "balanceAvailable": 94.525471,
+      "positionSize": 0,
+      "entryPrice": 0,
+      "openOrders": 0
+    },
+    "exchange": {
+      "activeTriggers": 0,
+      "slCount": 0,
+      "triggerIds": [],
+      "slTriggerIds": [],
+      "triggerSummaries": [],
+      "activeStopLossSpec": null,
+      "currentStopLoss": null
+    },
+    "safety": {
+      "emergencyStop": true,
+      "blockNewEntries": true,
+      "dryRun": false
+    }
+  },
+  "diagnosticsError": "O1 bot o1-SOLUSD-1 is not running; exchange snapshot only."
+}

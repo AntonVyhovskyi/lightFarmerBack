@@ -35,7 +35,7 @@ const readEmaAtrTrailStrategyParams = (): O1EmaAtrTrailStrategyParams => ({
   strengthLookbackCandles: asInt(process.env.O1_STRENGTH_LOOKBACK_CANDLES, 5),
 });
 
-const readEmaCrossoverAtrLiveParams = (): O1EmaCrossoverAtrLiveParams => ({
+export const readEmaCrossoverAtrLiveParams = (): O1EmaCrossoverAtrLiveParams => ({
   emaShortPeriod: asInt(process.env.O1_EMA_SHORT_PERIOD, 12),
   emaLongPeriod: asInt(process.env.O1_EMA_LONG_PERIOD, 21),
   atrPeriod: asInt(process.env.O1_ATR_PERIOD, 14),

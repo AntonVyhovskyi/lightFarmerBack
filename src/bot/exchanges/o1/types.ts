@@ -208,6 +208,8 @@ export type O1Diagnostics = {
     strategyName: string;
     riskPct: number;
     defaultLeverage: number;
+    emaShortPeriod?: number;
+    emaLongPeriod?: number;
   };
   candles: {
     configuredResolution: string;
@@ -253,6 +255,25 @@ export type O1Diagnostics = {
   };
   strategy: O1StrategyDiagnostics;
   history: O1HistoryDiagnostics;
+  crossoverAnalysis?: {
+    strategyName: string;
+    symbol: string;
+    resolution: string;
+    candleMode: string;
+    emaShortPeriod: number;
+    emaLongPeriod: number;
+    atrPeriod: number;
+    strengthLookbackCandles: number;
+    candlesLoaded: number;
+    firstCandleTs: number | null;
+    lastCandleTs: number | null;
+    scannedCandleCount: number;
+    warmupSkippedCount: number;
+    totalCrosses: number;
+    longCrosses: number;
+    shortCrosses: number;
+    last20CrossoverCandidates: import("./crossoverAnalysis").HistoricalCrossoverEvent[];
+  };
   poll: {
     intervalMs: number;
     lastPollIngestedTs: number | null;

@@ -27,60 +27,58 @@ export const computeStrengthPct = (
   candleTs: number[],
   strengthLookbackCandles: number
 ): O1StrengthCalcResult => {
-  if (closes.length < strengthLookbackCandles || candleTs.length < strengthLookbackCandles) {
+  if (closes.length < strengthLookbackCandles + 1 || candleTs.length < strengthLookbackCandles + 1) {
     return { strengthPct: null, debug: null };
   }
 
-  const lookbackCloses = closes.slice(-strengthLookbackCandles);
-  const lookbackCandleTs = candleTs.slice(-strengthLookbackCandles);
-  const currentClose = lookbackCloses[lookbackCloses.length - 1]!;
-  const highestClose = Math.max(...lookbackCloses);
-  const lowestClose = Math.min(...lookbackCloses);
+  const currentClose = closes[closes.length - 1]!;
+  const refCloses = closes.slice(-(strengthLookbackCandles + 1), -1);
+  const refCandleTs = candleTs.slice(-(strengthLookbackCandles + 1), -1);
 
-  if (!Number.isFinite(currentClose) || currentClose <= 0) {
+  if (refCloses.length === 0 || !Number.isFinite(currentClose) || currentClose <= 0) {
     return { strengthPct: null, debug: null };
   }
 
-  const referenceClose = side === "long" ? highestClose : lowestClose;
-  const referenceIdx = side === "long"
-    ? lookbackCloses.lastIndexOf(highestClose)
-    : lookbackCloses.lastIndexOf(lowestClose);
-  const selectedReferenceCandleTs = lookbackCandleTs[referenceIdx >= 0 ? referenceIdx : lookbackCandleTs.length - 1]!;
+  const highestClose = Math.max(...refCloses);
+  const lowestClose = Math.min(...refCloses);
+  const referenceClose = side === "long" ? lowestClose : highestClose;
+  const referenceIdx = side === "long" ? refCloses.indexOf(lowestClose) : refCloses.indexOf(highestClose);
+  const selectedReferenceCandleTs = refCandleTs[referenceIdx >= 0 ? referenceIdx : refCandleTs.length - 1]!;
 
   if (side === "long") {
-    const strengthPct = roundStrength((Math.abs(referenceClose - currentClose) / currentClose) * 100);
+    const strengthPct = roundStrength((Math.abs(currentClose - referenceClose) / currentClose) * 100);
     return {
       strengthPct,
       debug: {
         direction: "long",
         currentClose,
-        lookbackCloses,
-        lookbackCandleTs,
+        lookbackCloses: refCloses,
+        lookbackCandleTs: refCandleTs,
         lookbackCandles: strengthLookbackCandles,
         highestClose,
         lowestClose,
         selectedReferenceClose: referenceClose,
         selectedReferenceCandleTs,
-        formula: "abs(highestClose - currentClose) / currentClose * 100",
+        formula: "abs(currentClose - lowestCloseInPriorLookback) / currentClose * 100",
         strengthPct,
       },
     };
   }
 
-  const strengthPct = roundStrength((Math.abs(currentClose - referenceClose) / currentClose) * 100);
+  const strengthPct = roundStrength((Math.abs(referenceClose - currentClose) / currentClose) * 100);
   return {
     strengthPct,
     debug: {
       direction: "short",
       currentClose,
-      lookbackCloses,
-      lookbackCandleTs,
+      lookbackCloses: refCloses,
+      lookbackCandleTs: refCandleTs,
       lookbackCandles: strengthLookbackCandles,
       highestClose,
       lowestClose,
       selectedReferenceClose: referenceClose,
       selectedReferenceCandleTs,
-      formula: "abs(currentClose - lowestClose) / currentClose * 100",
+      formula: "abs(highestCloseInPriorLookback - currentClose) / currentClose * 100",
       strengthPct,
     },
   };

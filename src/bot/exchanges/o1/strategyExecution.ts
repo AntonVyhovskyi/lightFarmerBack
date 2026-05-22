@@ -2,6 +2,7 @@
 import type { O1CandleHandling } from "./candleResolution";
 import { O1Executor } from "./executor";
 import { compactTriggerSpec, logError, logInfo } from "./logger";
+import { incrementRejection } from "./history";
 import {
   mapExecutorReasonToCrossoverReason,
   recordManagerCrossoverSkip,
@@ -87,6 +88,8 @@ export const executeO1CrossoverEntry = async (
   const historyCtx = { state, config, candleHandling };
 
   if (state.blockNewEntries || state.emergencyStop) {
+    if (state.blockNewEntries) incrementRejection("blockNewEntriesRejected");
+    if (state.emergencyStop) incrementRejection("emergencyStopRejected");
     recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-other", {
       block: state.blockNewEntries ? "block-new-entries" : "emergency-stop",
     });
@@ -121,6 +124,7 @@ export const executeO1CrossoverEntry = async (
     bot.sizeDecimals
   );
   if (entrySize <= 0) {
+    incrementRejection("qtyZeroRejected");
     recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-invalid-size", {
       requestedSize: action.size,
       entryPrice: action.entryPrice,
@@ -134,6 +138,8 @@ export const executeO1CrossoverEntry = async (
     return;
   }
 
+  recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "filters_passed", { entrySize });
+
   logInfo("O1_ENTRY", "Executing entry", {
     side: direction,
     size: entrySize,
@@ -142,6 +148,8 @@ export const executeO1CrossoverEntry = async (
     stopLoss: action.stopLoss,
     dryRun: config.dryRun,
   });
+
+  recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "order_attempted", { entrySize });
 
   if (config.dryRun) {
     const crossoverRecord = recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-dry-run", {
@@ -162,6 +170,7 @@ export const executeO1CrossoverEntry = async (
     ? await executor.openLong(entrySize)
     : await executor.openShort(entrySize);
   if (openResult.ok === false) {
+    incrementRejection("orderRejected");
     recordManagerCrossoverSkip(
       historyCtx,
       closedCandleTs,
@@ -185,6 +194,11 @@ export const executeO1CrossoverEntry = async (
   const orderData = openResult.data as { actionId?: string; orderId?: string } | undefined;
   const orderResult = orderData?.actionId ?? orderData?.orderId ?? "ok";
 
+  recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "order_accepted", {
+    entrySize,
+    orderResult: String(orderResult),
+  });
+
   logStopGuard("POSITION_OPENED", bot as StopGuardContext, {
     orderId: orderResult,
     requestedSize: entrySize,
@@ -197,7 +211,12 @@ export const executeO1CrossoverEntry = async (
   });
 
   if (!positionWait.confirmed) {
+    incrementRejection("positionNotConfirmed");
     state.strategy.pendingEntryProtection = true;
+    recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-executor-error", {
+      note: "position-not-confirmed-yet",
+      orderResult: String(orderResult),
+    });
     logError("O1_STRATEGY_ERROR", "Entry submitted but position not confirmed yet; stop guard will retry", {
       side: action.type,
       orderResult,
@@ -220,7 +239,11 @@ export const executeO1CrossoverEntry = async (
 
   const crossoverRecord = config.dryRun
     ? null
-    : recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "entered", { entrySize });
+    : recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "position_confirmed", {
+        entrySize,
+        positionSize: state.positionSize,
+        entryPrice: state.entryPrice,
+      });
 
   const stopSide = action.type === "openLong" ? Side.Ask : Side.Bid;
   const stopSpec = state.strategy.activeStopLossSpec;
@@ -304,6 +327,13 @@ export const executeO1CrossoverEntry = async (
       });
       return;
     }
+
+    recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "entered_confirmed", {
+      entrySize,
+      positionSize: state.positionSize,
+      triggerId: state.strategy.activeStopLossSpec?.triggerId?.toString(),
+    });
+    incrementRejection("enteredConfirmed");
 
     recordManagerEntryEvent(historyCtx, closedCandleTs, {
       crossoverId: crossoverRecord?.id ?? null,

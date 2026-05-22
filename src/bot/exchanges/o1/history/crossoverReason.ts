@@ -15,6 +15,10 @@ export const mapStrategyReasonToCrossoverReason = (reason: string): O1CrossoverR
       return "skipped-other";
     case "manage-only-no-new-entries":
       return "skipped-other";
+    case "signal-found":
+      return "signal_found";
+    case "filters-passed":
+      return "filters_passed";
     default:
       return null;
   }

@@ -12,6 +12,7 @@ import { detectDirectClosedCandleTs } from "./candleDirect";
 import { pollRecentCandles } from "./candlePoll";
 import { upsertCandle } from "./candleCache";
 import { initO1Client, resetO1Client } from "./client";
+import { readEmaCrossoverAtrLiveParams } from "./env";
 import { sanitizeForApi } from "./logger";
 import { O1Executor } from "./executor";
 import {
@@ -52,8 +53,10 @@ import {
   EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME,
 } from "./strategies/types";
 import { getO1ConservativeEmaSignal } from "./strategyAdapter";
-import { getO1HistoryDiagnostics } from "./history";
+import { getO1HistoryDiagnostics, incrementRejection } from "./history";
+import { scanHistoricalEmaCrossovers } from "./crossoverAnalysis";
 import { recordCrossoverFromStrategySkip } from "./history/recordFromStrategy";
+import { recordManagerCrossoverSkip } from "./history/recordEntryPath";
 import type { O1Candle, O1Diagnostics, O1EmaCrossoverAtrLiveParams, O1EnvConfig, O1State } from "./types";
 import {
   fetchActiveTriggers,
@@ -839,7 +842,13 @@ export class O1BotManager {
     logStrategyTickFromState(state, candleHandling.effectiveResolution, closedCandleTs);
 
     if (action.type === "none") {
-      if (action.crossover) {
+      if (action.reason === "no-ema-cross") {
+        incrementRejection("noCross");
+      } else if (action.crossover) {
+        incrementRejection("crossFound");
+        if (action.reason === "strength-below-threshold") incrementRejection("strengthRejected");
+        if (action.reason === "cooldown-active") incrementRejection("cooldownRejected");
+        if (action.reason === "invalid-position-size") incrementRejection("qtyZeroRejected");
         recordCrossoverFromStrategySkip(bot, closedCandleTs, action.crossover, action.reason);
       }
       if (action.reason !== "position-open-managing" && action.reason !== "no-ema-cross") {
@@ -852,7 +861,19 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
+      if (action.crossover) {
+        incrementRejection("crossFound");
+        recordManagerCrossoverSkip(
+          { state, config, candleHandling },
+          closedCandleTs,
+          action.crossover,
+          "signal_found",
+          { signal: action.type }
+        );
+      }
       if (state.blockNewEntries || state.emergencyStop) {
+        if (state.blockNewEntries) incrementRejection("blockNewEntriesRejected");
+        if (state.emergencyStop) incrementRejection("emergencyStopRejected");
         logWarn("O1_STRATEGY_SKIP", "Entry signal ignored — safe mode active", {
           signal: action.type,
           blockNewEntries: state.blockNewEntries,
@@ -1007,6 +1028,31 @@ export class O1BotManager {
     if (enabled) bot.state.emergencyStop = true;
   }
 
+  private buildCrossoverAnalysis(bot: O1BotEntry): O1Diagnostics["crossoverAnalysis"] {
+    if (bot.config.strategyName !== EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME) return undefined;
+    const params = bot.config.strategyParams as O1EmaCrossoverAtrLiveParams;
+    const scan = scanHistoricalEmaCrossovers(bot.state.candles, params);
+    return {
+      strategyName: bot.config.strategyName,
+      symbol: bot.config.symbol,
+      resolution: String(bot.config.resolution),
+      candleMode: bot.candleHandling.mode,
+      emaShortPeriod: scan.emaShortPeriod,
+      emaLongPeriod: scan.emaLongPeriod,
+      atrPeriod: scan.atrPeriod,
+      strengthLookbackCandles: scan.strengthLookbackCandles,
+      candlesLoaded: scan.candlesLoaded,
+      firstCandleTs: scan.firstCandleTs,
+      lastCandleTs: scan.lastCandleTs,
+      scannedCandleCount: scan.scannedCandleCount,
+      warmupSkippedCount: scan.warmupSkippedCount,
+      totalCrosses: scan.totalCrosses,
+      longCrosses: scan.longCrosses,
+      shortCrosses: scan.shortCrosses,
+      last20CrossoverCandidates: scan.events.slice(-20),
+    };
+  }
+
   getDiagnostics(botId: string): O1Diagnostics {
     const bot = this.bots.get(botId);
     if (!bot) throw new Error(`O1 bot ${botId} not found.`);
@@ -1030,6 +1076,14 @@ export class O1BotManager {
         riskPct: config.riskPct,
         defaultLeverage: config.defaultLeverage,
         strategyName: config.strategyName,
+        emaShortPeriod:
+          config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME
+            ? (config.strategyParams as O1EmaCrossoverAtrLiveParams).emaShortPeriod
+            : (config.strategyParams as import("./types").O1EmaAtrTrailStrategyParams).emaShortPeriod,
+        emaLongPeriod:
+          config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME
+            ? (config.strategyParams as O1EmaCrossoverAtrLiveParams).emaLongPeriod
+            : (config.strategyParams as import("./types").O1EmaAtrTrailStrategyParams).emaLongPeriod,
       },
       initialized: { nord: true, user: true },
       user: { pubkey: bot.pubkey, accountId: config.accountId },
@@ -1073,6 +1127,7 @@ export class O1BotManager {
       },
       strategy: state.strategy,
       history: getO1HistoryDiagnostics(),
+      crossoverAnalysis: this.buildCrossoverAnalysis(bot),
       poll: {
         intervalMs: config.candlePollIntervalMs,
         lastPollIngestedTs: bot.lastPollIngestedTs,
@@ -1107,11 +1162,54 @@ export class O1BotManager {
     const activeStopLossSpec = newestSl
       ? sanitizeForApi(toTriggerSpecFromApi(newestSl, priceDecimals, sizeDecimals))
       : null;
+
+    const botResolutionSuffix = botId.split("-").pop();
+    const shouldRunCrossoverScan =
+      config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME ||
+      (botId.startsWith(`o1-${config.symbol}-`) && botResolutionSuffix === "1");
+
+    const scanConfig = { ...config };
+    if (shouldRunCrossoverScan) {
+      scanConfig.strategyName = EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME;
+      scanConfig.strategyParams = readEmaCrossoverAtrLiveParams();
+      if (botResolutionSuffix && /^\d+$/.test(botResolutionSuffix)) {
+        scanConfig.resolution = botResolutionSuffix as import("./types").O1EnvConfig["resolution"];
+      }
+    }
+
+    const preloaded = shouldRunCrossoverScan ? await preloadO1Candles(scanConfig) : [];
+
+    let crossoverAnalysis: O1Diagnostics["crossoverAnalysis"];
+    if (shouldRunCrossoverScan) {
+      const params = scanConfig.strategyParams as O1EmaCrossoverAtrLiveParams;
+      const scan = scanHistoricalEmaCrossovers(preloaded, params);
+      crossoverAnalysis = {
+        strategyName: scanConfig.strategyName,
+        symbol: scanConfig.symbol,
+        resolution: String(scanConfig.resolution),
+        candleMode: resolveO1CandleHandling(scanConfig).mode,
+        emaShortPeriod: scan.emaShortPeriod,
+        emaLongPeriod: scan.emaLongPeriod,
+        atrPeriod: scan.atrPeriod,
+        strengthLookbackCandles: scan.strengthLookbackCandles,
+        candlesLoaded: scan.candlesLoaded,
+        firstCandleTs: scan.firstCandleTs,
+        lastCandleTs: scan.lastCandleTs,
+        scannedCandleCount: scan.scannedCandleCount,
+        warmupSkippedCount: scan.warmupSkippedCount,
+        totalCrosses: scan.totalCrosses,
+        longCrosses: scan.longCrosses,
+        shortCrosses: scan.shortCrosses,
+        last20CrossoverCandidates: scan.events.slice(-20),
+      };
+    }
+
     return {
       botRunning: false,
       botId,
       expectedBotId,
       botIdMatchesEnv: botId === expectedBotId,
+      crossoverAnalysis,
       account: {
         accountId: config.accountId,
         balanceTotal: snapshot.balanceTotal,
@@ -1135,6 +1233,39 @@ export class O1BotManager {
         emergencyStop: config.emergencyStop,
         blockNewEntries: config.blockNewEntries,
         dryRun: config.dryRun,
+      },
+      history: getO1HistoryDiagnostics(),
+      strategyParams: config.strategyParams,
+      env: {
+        enabled: config.enabled,
+        dryRun: config.dryRun,
+        emergencyStop: config.emergencyStop,
+        symbol: config.symbol,
+        resolution: config.resolution,
+        marketId: config.marketId,
+        accountId: config.accountId,
+        strategyName: config.strategyName,
+        riskPct: config.riskPct,
+        defaultLeverage: config.defaultLeverage,
+        emaShortPeriod:
+          config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME
+            ? (config.strategyParams as O1EmaCrossoverAtrLiveParams).emaShortPeriod
+            : (config.strategyParams as import("./types").O1EmaAtrTrailStrategyParams).emaShortPeriod,
+        emaLongPeriod:
+          config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME
+            ? (config.strategyParams as O1EmaCrossoverAtrLiveParams).emaLongPeriod
+            : (config.strategyParams as import("./types").O1EmaAtrTrailStrategyParams).emaLongPeriod,
+      },
+      candles: {
+        configuredResolution: String(config.resolution),
+        effectiveResolution: String(config.resolution),
+        candleMode: resolveO1CandleHandling(config).mode,
+        streamResolution: String(config.resolution),
+      },
+      market: {
+        candleCacheSize: preloaded.length,
+        preloadedCandleCount: preloaded.length,
+        candlePreloaded: preloaded.length > 0,
       },
     };
   }
