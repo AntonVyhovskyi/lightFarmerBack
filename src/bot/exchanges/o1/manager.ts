@@ -662,6 +662,11 @@ export class O1BotManager {
         force: options?.force ?? bot.state.strategy.pendingEntryProtection,
         skipDebounce: options?.force ?? bot.state.strategy.pendingEntryProtection,
       });
+    } catch (error) {
+      logWarn("O1_STOP_GUARD", "Stop guard run failed (non-fatal)", {
+        source,
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       this.stopGuardInFlight.delete(botId);
     }
@@ -686,6 +691,10 @@ export class O1BotManager {
       clearPositionLinkedStrategyState(state);
       if (bot.config.strategyName === EMA_CROSSOVER_ATR_LIVE_STRATEGY_NAME) {
         applyExitCooldown(state, (bot.config.strategyParams as O1EmaCrossoverAtrLiveParams).cooldownCandles);
+      }
+      if (!bot.config.blockNewEntries && !bot.config.emergencyStop) {
+        state.blockNewEntries = false;
+        state.emergencyStop = false;
       }
       logInfo("O1_POSITION_CLEARED", "Position closed; cleared strategy position state", {
         previousPositionSize: wasPosition,
@@ -861,19 +870,24 @@ export class O1BotManager {
     }
 
     if (action.type === "openLong" || action.type === "openShort") {
-      if (action.crossover) {
-        incrementRejection("crossFound");
-        recordManagerCrossoverSkip(
-          { state, config, candleHandling },
-          closedCandleTs,
-          action.crossover,
-          "signal_found",
-          { signal: action.type }
-        );
-      }
+      if (action.crossover) incrementRejection("crossFound");
       if (state.blockNewEntries || state.emergencyStop) {
         if (state.blockNewEntries) incrementRejection("blockNewEntriesRejected");
         if (state.emergencyStop) incrementRejection("emergencyStopRejected");
+        if (action.crossover) {
+          recordManagerCrossoverSkip(
+            { state, config, candleHandling },
+            closedCandleTs,
+            action.crossover,
+            "skipped-other",
+            {
+              stage: "manager-safe-mode-block",
+              signal: action.type,
+              blockNewEntries: state.blockNewEntries,
+              emergencyStop: state.emergencyStop,
+            }
+          );
+        }
         logWarn("O1_STRATEGY_SKIP", "Entry signal ignored — safe mode active", {
           signal: action.type,
           blockNewEntries: state.blockNewEntries,
@@ -1012,6 +1026,36 @@ export class O1BotManager {
     const bot = this.bots.get(botId);
     if (!bot) throw new Error(`O1 bot ${botId} not found.`);
     await this.syncBotState(bot);
+  }
+
+  /** Reduce-only close + trigger cleanup so the next crossover can enter (live proof / tests). */
+  async flattenForNextEntry(botId: string): Promise<void> {
+    const bot = this.bots.get(botId);
+    if (!bot) return;
+    try {
+      if (bot.state.positionSize !== 0) {
+        await bot.executor.closePosition();
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+      }
+      await this.syncBotState(bot);
+      await this.reconcilePositionLifecycle(bot);
+      if (!bot.config.accountId) return;
+      const triggers = await fetchActiveTriggers(bot.nord, bot.config.accountId);
+      for (const t of triggers.filter((r) => r.marketId === bot.config.marketId)) {
+        await bot.executor.removeKnownTrigger(
+          toTriggerSpecFromApi(t, bot.priceDecimals, bot.sizeDecimals)
+        );
+      }
+      await this.syncBotState(bot);
+      await this.reconcilePositionLifecycle(bot);
+      bot.state.strategy.cooldownCandlesRemaining = 0;
+      bot.state.strategy.pendingEntryProtection = false;
+    } catch (error) {
+      logWarn("O1_FLATTEN", "flattenForNextEntry failed (non-fatal)", {
+        botId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   setEmergencyStop(botId: string, enabled: boolean): void {

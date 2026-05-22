@@ -2,7 +2,7 @@
 import type { O1CandleHandling } from "./candleResolution";
 import { O1Executor } from "./executor";
 import { compactTriggerSpec, logError, logInfo } from "./logger";
-import { incrementRejection } from "./history";
+import { getPipelineStageCounts, getRejectionCounters, incrementRejection } from "./history";
 import {
   mapExecutorReasonToCrossoverReason,
   recordManagerCrossoverSkip,
@@ -92,6 +92,7 @@ export const executeO1CrossoverEntry = async (
     if (state.emergencyStop) incrementRejection("emergencyStopRejected");
     recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "skipped-other", {
       block: state.blockNewEntries ? "block-new-entries" : "emergency-stop",
+      stage: "pre-execution-blocked",
     });
     logError("O1_STRATEGY_ERROR", "Entry blocked by safe mode", {
       blockNewEntries: state.blockNewEntries,
@@ -115,6 +116,12 @@ export const executeO1CrossoverEntry = async (
     });
     return;
   }
+
+  recordManagerCrossoverSkip(historyCtx, closedCandleTs, snapshot, "signal_found", {
+    signal: action.type,
+    entryPrice: action.entryPrice,
+    stopLoss: action.stopLoss,
+  });
 
   const entrySize = clampEntrySizeToLimits(
     action.size,
@@ -334,6 +341,10 @@ export const executeO1CrossoverEntry = async (
       triggerId: state.strategy.activeStopLossSpec?.triggerId?.toString(),
     });
     incrementRejection("enteredConfirmed");
+    logInfo("O1_PIPELINE_SUMMARY", "Entry pipeline complete", {
+      ...getPipelineStageCounts(),
+      rejectionCounters: getRejectionCounters(),
+    });
 
     recordManagerEntryEvent(historyCtx, closedCandleTs, {
       crossoverId: crossoverRecord?.id ?? null,

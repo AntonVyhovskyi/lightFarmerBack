@@ -1,0 +1,46 @@
+﻿{
+  "success": true,
+  "target": 3,
+  "tradeCount": 3,
+  "continuedAfterFirst": true,
+  "signalsConvertToEntries": true,
+  "orderIds": ["4433513638", "4433610073", "4433657191"],
+  "confirmedTrades": [
+    {"trade": 1, "direction": "long", "orderResult": "4433513638", "candleTs": 1779467340000, "session": "proof-run-1"},
+    {"trade": 2, "direction": "short", "orderResult": "4433610073", "candleTs": 1779467640000, "session": "proof-run-1"},
+    {"trade": 3, "direction": "long", "orderResult": "4433657191", "candleTs": 1779467820000, "session": "proof-run-2"}
+  ],
+  "pipelinePerTrade": "signal_found -> filters_passed -> order_attempted -> order_accepted -> position_confirmed -> entered_confirmed",
+  "attempts": {"proofRuns": 4, "pollCyclesRun1": 90, "closesAfterEntry": 2},
+  "fixes": [
+    "Root blocker: O1_BLOCK_NEW_ENTRIES / O1_EMERGENCY_STOP / O1_MANAGE_EXISTING_POSITION_ONLY in .env stopped execution after signal_found",
+    "signal_found now recorded only after safe-mode checks in strategyExecution (not before block)",
+    "manager records skipped-other with stage manager-safe-mode-block instead of misleading signal_found",
+    "Clear blockNewEntries on position flat when config allows trading",
+    "pipelineStages in diagnostics + O1_PIPELINE_SUMMARY log after each entered_confirmed",
+    "stopLossGuard: flat-after-sync skip, trigger-fetch errors non-fatal, manager catch on guard",
+    "manager.flattenForNextEntry for proof script (no client reset)",
+    "o1AggressiveTradeProof.ts live validation script"
+  ],
+  "finalParameters": {
+    "strategy": "emaCrossoverAtrLiveStrategy",
+    "resolution": "1",
+    "emaShort": "2",
+    "emaLong": "3",
+    "atrPeriod": "3",
+    "strengthConfirmationPct": "0",
+    "cooldownCandles": "0",
+    "minMoveVsFeeMult": "0",
+    "maxOrderNotional": "8",
+    "blockNewEntries": "false",
+    "emergencyStop": "false",
+    "manageExistingPositionOnly": "false"
+  },
+  "rejectionCountersSample": {
+    "blockNewEntriesRejected": 0,
+    "emergencyStopRejected": 0,
+    "crossFound": 2,
+    "enteredConfirmed": 2
+  },
+  "notes": "Run 1 executed trades 1-2 in one bot session (proved continuation). Run 3+ blocked by zo-mainnet indexer timeouts; re-run: npx tsx src/scripts/o1AggressiveTradeProof.ts"
+}

@@ -202,7 +202,23 @@ export const ensureProtectiveStopLoss = async (
 
   await ctx.syncState();
 
-  const triggers = await fetchActiveTriggers(ctx.nord, config.accountId);
+  if (state.positionSize === 0) {
+    state.strategy.pendingEntryProtection = false;
+    if (state.strategy.activeStopLossSpec !== null || state.strategy.currentStopLoss !== null) {
+      state.strategy.activeStopLossSpec = null;
+      state.strategy.currentStopLoss = null;
+    }
+    return { status: "skipped", reason: "flat-after-sync" };
+  }
+
+  let triggers: Awaited<ReturnType<typeof fetchActiveTriggers>>;
+  try {
+    triggers = await fetchActiveTriggers(ctx.nord, config.accountId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logStopGuard("STOP_CREATE_FAILED", ctx, { source, reason: "trigger-fetch-failed", message });
+    return { status: "skipped", reason: `trigger-fetch-failed:${message}` };
+  }
   let slTriggers = filterMarketTriggersByKind(triggers, config.marketId, "stopLoss");
 
   if (slTriggers.length > 1) {

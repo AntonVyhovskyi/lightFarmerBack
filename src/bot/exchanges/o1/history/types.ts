@@ -66,11 +66,22 @@ export type O1EntryRecord = {
   failureReason: string | null;
 };
 
+export type O1PipelineStageCounts = {
+  signal_found: number;
+  filters_passed: number;
+  order_attempted: number;
+  order_accepted: number;
+  position_confirmed: number;
+  entered_confirmed: number;
+  entered_confirmed_entries: number;
+};
+
 export type O1HistoryDiagnostics = {
   crossoverCacheSize: number;
   entryCacheSize: number;
   lastCrossover: O1CrossoverRecord | null;
   lastEntry: O1EntryRecord | null;
   rejectionCounters: import("./rejectionCounters").O1RejectionCounters;
+  pipelineStages: O1PipelineStageCounts;
   runtimeCrossoverNote: string;
 };
