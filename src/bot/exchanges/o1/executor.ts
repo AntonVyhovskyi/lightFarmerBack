@@ -231,7 +231,6 @@ export class O1Executor {
       side,
       kind: TriggerKind.StopLoss,
       triggerPrice,
-      limitPrice: triggerPrice,
       limitBaseSize: size,
     });
   }
@@ -242,13 +241,10 @@ export class O1Executor {
     sizeDecimals: number,
     postEntryDelayMs = 1500
   ): Promise<O1Result<{ triggerId?: string }>> {
+    const { limitPrice: _omitLimit, ...specWithoutLimit } = spec;
     const roundedSpec: O1TriggerSpec = {
-      ...spec,
+      ...specWithoutLimit,
       triggerPrice: roundToDecimals(spec.triggerPrice, priceDecimals),
-      limitPrice:
-        spec.limitPrice !== undefined
-          ? roundToDecimals(spec.limitPrice, priceDecimals)
-          : roundToDecimals(spec.triggerPrice, priceDecimals),
       limitBaseSize:
         spec.limitBaseSize !== undefined
           ? roundToDecimals(spec.limitBaseSize, sizeDecimals)
@@ -317,15 +313,34 @@ export class O1Executor {
     if (left.triggerId !== undefined && right.triggerId !== undefined) {
       return left.triggerId === right.triggerId;
     }
-    return (
+    const baseMatch =
       left.marketId === right.marketId &&
       left.side === right.side &&
       left.kind === right.kind &&
       left.triggerPrice === right.triggerPrice &&
-      left.limitPrice === right.limitPrice &&
       left.limitBaseSize === right.limitBaseSize &&
-      left.limitQuoteSize === right.limitQuoteSize
-    );
+      left.limitQuoteSize === right.limitQuoteSize;
+    if (left.kind === TriggerKind.StopLoss) return baseMatch;
+    return baseMatch && left.limitPrice === right.limitPrice;
+  }
+
+  /** Stop-loss: trigger only (no limit) → market reduce on fire. Take-profit unchanged. */
+  private toExchangeTriggerParams(
+    spec: O1TriggerSpec
+  ): Parameters<NordUser["addTrigger"]>[0] {
+    const params: Parameters<NordUser["addTrigger"]>[0] = {
+      marketId: spec.marketId,
+      side: spec.side,
+      kind: spec.kind,
+      triggerPrice: spec.triggerPrice,
+      limitBaseSize: spec.limitBaseSize,
+      limitQuoteSize: spec.limitQuoteSize,
+      accountId: this.config.accountId,
+    };
+    if (spec.kind === TriggerKind.TakeProfit && spec.limitPrice !== undefined) {
+      params.limitPrice = spec.limitPrice;
+    }
+    return params;
   }
 
   private async editTrigger(triggerId: bigint, spec: O1TriggerSpec): Promise<O1Result<{ triggerId?: string }>> {
@@ -343,14 +358,7 @@ export class O1Executor {
       logInfo(tag, "Editing trigger", compact);
       await this.user.editTrigger({
         triggerId,
-        marketId: spec.marketId,
-        side: spec.side,
-        kind: spec.kind,
-        triggerPrice: spec.triggerPrice,
-        limitPrice: spec.limitPrice,
-        limitBaseSize: spec.limitBaseSize,
-        limitQuoteSize: spec.limitQuoteSize,
-        accountId: this.config.accountId,
+        ...this.toExchangeTriggerParams(spec),
       });
       const stored = { ...spec, triggerId };
       const index = this.sentTriggerSpecs.findIndex((entry) => entry.triggerId === triggerId);
@@ -378,7 +386,7 @@ export class O1Executor {
 
     try {
       logInfo(tag, "Submitting trigger", compact);
-      const result = await this.user.addTrigger({ ...spec, accountId: this.config.accountId });
+      const result = await this.user.addTrigger(this.toExchangeTriggerParams(spec));
       const stored = { ...spec, triggerId: result.triggerId };
       this.rememberTrigger(stored);
       logInfo(tag, "Trigger submitted", { ...compact, triggerId: result.triggerId.toString() });

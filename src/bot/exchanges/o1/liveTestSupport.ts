@@ -152,7 +152,7 @@ export const toTriggerSpecFromApi = (
     triggerId: normalized.triggerId,
     triggerPrice: unscaleMantissa(normalized.triggerPriceMantissa, priceDecimals),
     limitPrice:
-      normalized.limitPriceMantissa != null
+      normalized.kind === "takeProfit" && normalized.limitPriceMantissa != null
         ? unscaleMantissa(normalized.limitPriceMantissa, priceDecimals)
         : undefined,
     limitBaseSize:
@@ -221,16 +221,21 @@ export const triggersMatchSpec = (
   if (spec.triggerId !== undefined && normalized.triggerId !== undefined) {
     return normalized.triggerId === spec.triggerId;
   }
-  return (
+  const baseMatch =
     normalized.marketId === spec.marketId &&
     normalized.side === spec.side &&
     normalized.kind === spec.kind &&
     normalized.triggerPrice === spec.triggerPrice &&
-    (spec.limitPrice === undefined || (normalized.limitPrice ?? undefined) === spec.limitPrice) &&
     (spec.limitBaseSize === undefined ||
       (normalized.limitBaseSize ?? undefined) === spec.limitBaseSize) &&
     (spec.limitQuoteSize === undefined ||
-      (normalized.limitQuoteSize ?? undefined) === spec.limitQuoteSize)
+      (normalized.limitQuoteSize ?? undefined) === spec.limitQuoteSize);
+
+  if (spec.kind === TriggerKind.StopLoss) return baseMatch;
+
+  return (
+    baseMatch &&
+    (spec.limitPrice === undefined || (normalized.limitPrice ?? undefined) === spec.limitPrice)
   );
 };
 

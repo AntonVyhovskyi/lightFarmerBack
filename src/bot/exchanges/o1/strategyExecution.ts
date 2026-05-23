@@ -373,7 +373,8 @@ export const executeO1StopLossUpdate = async (
     return false;
   }
 
-  const nextSpec = { ...currentSpec, triggerPrice: action.stopLoss };
+  const { limitPrice: _omit, ...baseSpec } = currentSpec;
+  const nextSpec = { ...baseSpec, triggerPrice: action.stopLoss };
   const logTag = action.updateKind === "break-even" ? "O1_BE" : "O1_TRAIL";
   logInfo(logTag, "Updating stop-loss", {
     oldSL: action.previousStopLoss,

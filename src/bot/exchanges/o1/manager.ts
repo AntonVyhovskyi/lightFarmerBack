@@ -776,8 +776,9 @@ export class O1BotManager {
         return;
       }
 
+      const { limitPrice: _omit, ...baseSpec } = currentSpec;
       const nextSpec = {
-        ...currentSpec,
+        ...baseSpec,
         triggerPrice: action.stopLoss,
       };
 

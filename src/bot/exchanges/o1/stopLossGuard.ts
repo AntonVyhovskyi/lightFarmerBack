@@ -156,16 +156,17 @@ export const buildStopSpecForOpenPosition = (ctx: StopGuardContext): O1TriggerSp
   );
 
   const side = isLong ? Side.Ask : Side.Bid;
-  return existing
-    ? { ...existing, triggerPrice, limitBaseSize: size, side, limitPrice: triggerPrice }
-    : {
-        marketId: config.marketId,
-        side,
-        kind: TriggerKind.StopLoss,
-        triggerPrice,
-        limitPrice: triggerPrice,
-        limitBaseSize: roundToDecimals(size, sizeDecimals),
-      };
+  if (existing) {
+    const { limitPrice: _omit, ...rest } = existing;
+    return { ...rest, triggerPrice, limitBaseSize: size, side };
+  }
+  return {
+    marketId: config.marketId,
+    side,
+    kind: TriggerKind.StopLoss,
+    triggerPrice,
+    limitBaseSize: roundToDecimals(size, sizeDecimals),
+  };
 };
 
 export type StopGuardResult =
