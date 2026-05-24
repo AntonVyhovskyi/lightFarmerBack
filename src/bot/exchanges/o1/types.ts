@@ -84,6 +84,10 @@ export type O1EnvConfig = {
   debugWs: boolean;
   candlePollIntervalMs: number;
   manageExistingPositionOnly: boolean;
+  /** 0 = disabled. Flat-only maintenance restart interval. */
+  scheduledRestartIntervalHours: number;
+  /** Pause between stop and start during scheduled restart. */
+  scheduledRestartCooldownMs: number;
 };
 
 export type O1WsStatuses = {

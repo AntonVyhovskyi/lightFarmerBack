@@ -110,12 +110,16 @@ type O1BotEntry = {
   candleConnectedAt: number;
   lastPollIngestedTs: number | null;
   lastKnownPositionSize: number;
+  scheduledRestartTimer?: NodeJS.Timeout;
+  nextScheduledRestartAt: number;
+  scheduledRestartInFlight: boolean;
 };
 
 export class O1BotManager {
   private bots = new Map<string, O1BotEntry>();
   private stopGuardInFlight = new Set<string>();
   private stopGuardTimers = new Map<string, NodeJS.Timeout>();
+  private scheduledRestartInFlight = new Set<string>();
 
   async start(): Promise<string> {
     if (this.bots.size > 0) throw new Error("An O1 bot is already running.");
@@ -227,18 +231,30 @@ export class O1BotManager {
       }
     }
 
+    const markWsReconnectHealthy = () => {
+      if (state.ws.candleConnected && state.ws.accountConnected) {
+        state.ws.reconnectCount = 0;
+      }
+    };
+
     const reconnect = () => {
       const bot = this.bots.get(botId);
       if (!bot) return;
       const { reconnectCount } = bot.state.ws;
       if (reconnectCount >= config.reconnectAttemptsMax) {
-        logError("O1_WS", "Reconnect attempts exceeded max limit", { reconnectCount });
-        return;
+        if (bot.state.positionSize !== 0) {
+          logError("O1_WS", "Reconnect attempts exceeded max limit", { reconnectCount });
+          return;
+        }
+        logWarn("O1_WS", "Reconnect max reached while flat — recycling websockets", { reconnectCount });
+        bot.state.ws.reconnectCount = 0;
+      } else {
+        bot.state.ws.reconnectCount += 1;
       }
-      bot.state.ws.reconnectCount += 1;
       bot.state.ws.lastReconnectAttemptAt = Date.now();
-      const delay = Math.min(config.reconnectMaxMs, config.reconnectBaseMs * 2 ** reconnectCount);
-      logWarn("O1_WS", "Scheduling reconnect", { delay, reconnectCount });
+      const attempt = bot.state.ws.reconnectCount;
+      const delay = Math.min(config.reconnectMaxMs, config.reconnectBaseMs * 2 ** attempt);
+      logWarn("O1_WS", "Scheduling reconnect", { delay, reconnectCount: attempt });
       bot.reconnectTimer = setTimeout(() => {
         bot.wsHandle?.stop();
         bot.wsHandle?.start();
@@ -361,13 +377,17 @@ export class O1BotManager {
       config,
       state,
       candleStreamResolution: candleHandling.streamResolution,
-      onCandleConnected: scheduleCandlePayloadWatchdog,
+      onCandleConnected: () => {
+        scheduleCandlePayloadWatchdog();
+        markWsReconnectHealthy();
+      },
       onCandle: (candle) => handleLiveCandle(candle, "ws"),
       onAccount: (payload) => {
         this.handleAccountUpdate(state, payload, config.marketId);
         void this.runStopLossGuard(botId, "account-ws");
       },
       onAccountConnected: () => {
+        markWsReconnectHealthy();
         void (async () => {
           await executor.syncAccount();
           this.syncStateFromUser(state, user, config.marketId, config.accountId!);
@@ -460,6 +480,9 @@ export class O1BotManager {
       await runStep("reconnectTimer", () => {
         if (entry?.reconnectTimer) clearTimeout(entry.reconnectTimer);
       });
+      await runStep("scheduledRestartTimer", () => {
+        if (entry?.scheduledRestartTimer) clearInterval(entry.scheduledRestartTimer);
+      });
 
       state.blockNewEntries = true;
       state.emergencyStop = true;
@@ -479,6 +502,23 @@ export class O1BotManager {
     };
 
     this.stopGuardTimers.set(botId, stopGuardWatchdog);
+
+    const restartIntervalMs =
+      config.scheduledRestartIntervalHours > 0
+        ? config.scheduledRestartIntervalHours * 3_600_000
+        : 0;
+    let scheduledRestartTimer: NodeJS.Timeout | undefined;
+    if (restartIntervalMs > 0) {
+      const checkMs = Math.min(5 * 60_000, Math.max(60_000, Math.floor(restartIntervalMs / 6)));
+      scheduledRestartTimer = setInterval(() => {
+        void this.maybeScheduledRestart(botId);
+      }, checkMs);
+      logInfo("O1_SCHEDULED_RESTART", "Flat maintenance restart enabled", {
+        intervalHours: config.scheduledRestartIntervalHours,
+        cooldownMs: config.scheduledRestartCooldownMs,
+        checkMs,
+      });
+    }
 
     this.bots.set(botId, {
       id: botId,
@@ -503,6 +543,9 @@ export class O1BotManager {
       candleConnectedAt,
       lastPollIngestedTs,
       lastKnownPositionSize: state.positionSize,
+      scheduledRestartTimer,
+      nextScheduledRestartAt: restartIntervalMs > 0 ? Date.now() + restartIntervalMs : Number.MAX_SAFE_INTEGER,
+      scheduledRestartInFlight: false,
     });
 
     const bot = this.bots.get(botId);
@@ -703,10 +746,24 @@ export class O1BotManager {
       await this.cleanupStaleBotTriggers(bot);
     } else if (isFlat && hasStalePositionStrategyState(state)) {
       clearPositionLinkedStrategyState(state);
+      if (!bot.config.blockNewEntries && !bot.config.emergencyStop) {
+        state.blockNewEntries = false;
+        state.emergencyStop = false;
+      }
       logInfo("O1_POSITION_CLEARED", "Flat account; cleared stale strategy position state", {
         positionSize: state.positionSize,
       });
       await this.cleanupStaleBotTriggers(bot);
+    } else if (
+      isFlat &&
+      state.blockNewEntries &&
+      !bot.config.blockNewEntries &&
+      !bot.config.emergencyStop
+    ) {
+      state.blockNewEntries = false;
+      logInfo("O1_SAFE_MODE", "Flat account — cleared runtime blockNewEntries", {
+        positionSize: state.positionSize,
+      });
     }
 
     bot.lastKnownPositionSize = state.positionSize;
@@ -1027,6 +1084,62 @@ export class O1BotManager {
     const bot = this.bots.get(botId);
     if (!bot) throw new Error(`O1 bot ${botId} not found.`);
     await this.syncBotState(bot);
+  }
+
+  private async canScheduledRestart(bot: O1BotEntry): Promise<boolean> {
+    await this.syncBotState(bot);
+    if (bot.state.positionSize !== 0 || bot.state.orders.length > 0) return false;
+    if (!bot.config.accountId) return false;
+    try {
+      const triggers = await fetchActiveTriggers(bot.nord, bot.config.accountId);
+      return triggers.filter((t) => t.marketId === bot.config.marketId).length === 0;
+    } catch (error) {
+      logWarn("O1_SCHEDULED_RESTART", "Could not verify triggers for restart gate", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private async maybeScheduledRestart(botId: string): Promise<void> {
+    if (this.scheduledRestartInFlight.has(botId)) return;
+    const bot = this.bots.get(botId);
+    if (!bot) return;
+    if (bot.config.scheduledRestartIntervalHours <= 0) return;
+    if (Date.now() < bot.nextScheduledRestartAt) return;
+
+    if (!(await this.canScheduledRestart(bot))) {
+      bot.nextScheduledRestartAt = Date.now() + 5 * 60_000;
+      return;
+    }
+
+    this.scheduledRestartInFlight.add(botId);
+    const cooldownMs = bot.config.scheduledRestartCooldownMs;
+    const intervalMs = bot.config.scheduledRestartIntervalHours * 3_600_000;
+    logInfo("O1_SCHEDULED_RESTART", "Starting flat maintenance restart", { botId, cooldownMs });
+
+    try {
+      const stopFn = bot.stop;
+      await stopFn();
+      await new Promise((resolve) => setTimeout(resolve, cooldownMs));
+      if (this.bots.size > 0) {
+        logWarn("O1_SCHEDULED_RESTART", "Skipped start — another bot instance is running");
+        return;
+      }
+      const newBotId = await this.start();
+      const restarted = this.bots.get(newBotId);
+      if (restarted) {
+        restarted.nextScheduledRestartAt = Date.now() + intervalMs;
+      }
+      logInfo("O1_SCHEDULED_RESTART", "Maintenance restart complete", { botId: newBotId });
+    } catch (error) {
+      logError("O1_SCHEDULED_RESTART", "Maintenance restart failed", {
+        botId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.scheduledRestartInFlight.delete(botId);
+    }
   }
 
   /** Reduce-only close + trigger cleanup so the next crossover can enter (live proof / tests). */

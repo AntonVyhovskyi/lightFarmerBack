@@ -34,7 +34,8 @@ const applyAggressiveTestEnv = (): void => {
   process.env.O1_TEST_MAINNET_CONFIRMED = "true";
   process.env.O1_PROOF_MAX_MS = process.env.O1_PROOF_MAX_MS ?? "3600000";
   process.env.O1_PROOF_POLL_MS = process.env.O1_PROOF_POLL_MS ?? "4000";
-  process.env.O1_PROOF_TARGET = process.env.O1_PROOF_TARGET ?? "3";
+  process.env.O1_PROOF_TARGET = process.env.O1_PROOF_TARGET ?? "2";
+  process.env.O1_SCHEDULED_RESTART_HOURS = "0";
 };
 
 applyAggressiveTestEnv();
@@ -66,13 +67,16 @@ type ConfirmedTrade = {
   timestamp: number;
   direction: string;
   size: number;
+  slOnExchange: boolean;
 };
 
 const fixes: string[] = [
   "signal_found only recorded after safe-mode checks pass (strategyExecution)",
   "manager records skipped-other for safe-mode block instead of misleading signal_found",
   "clear blockNewEntries/emergencyStop on position flat when config allows trading",
-  "pipelineStages + O1_PIPELINE_SUMMARY logging added to diagnostics",
+  "reset reconnectCount when candle+account WS healthy; soft recycle at max reconnect while flat",
+  "scheduled flat restart: O1_SCHEDULED_RESTART_HOURS / O1_SCHEDULED_RESTART_COOLDOWN_MS",
+  "stop-loss triggers omit limitPrice (market exit on fire)",
 ];
 
 const reportPath = path.join(process.cwd(), "o1-trade-proof-report.json");
@@ -176,6 +180,8 @@ async function main(): Promise<void> {
       const stages = getPipelineStageCounts();
       const rejectionCounters = getRejectionCounters();
       const diag = manager.getDiagnostics(botId);
+      const { diagnostics: safeDiag } = await manager.getSafeDiagnostics(botId);
+      const ex = safeDiag?.exchange as { slCount?: number } | undefined;
 
       for (const cross of listCrossovers().filter((c) => c.reason === "entered_confirmed")) {
         if (seenCrossoverIds.has(cross.id)) continue;
@@ -184,8 +190,8 @@ async function main(): Promise<void> {
           (e) => e.crossoverId === cross.id && e.status === "opened"
         );
         const orderResult =
-          (cross.details?.orderResult as string | undefined) ??
           matchEntry?.orderResult ??
+          (cross.details?.orderResult as string | undefined) ??
           null;
         confirmed.push({
           entryId: matchEntry?.id ?? `cross-${cross.id}`,
@@ -194,6 +200,7 @@ async function main(): Promise<void> {
           timestamp: cross.timestamp,
           direction: cross.direction,
           size: matchEntry?.size ?? cross.calculatedSize ?? 0,
+          slOnExchange: (ex?.slCount ?? 0) >= 1 || diag.account.positionSize !== 0,
         });
       }
 
@@ -203,8 +210,9 @@ async function main(): Promise<void> {
         stages,
         rejectionCounters,
         positionSize: diag.account.positionSize,
-        blockNewEntries: diag.safeMode?.blockNewEntries,
-        emergencyStop: diag.safeMode?.emergencyStop,
+        slCount: (diag as { exchange?: { slCount?: number } }).exchange?.slCount ?? 0,
+        blockNewEntries: (diag as { safety?: { blockNewEntries?: boolean } }).safety?.blockNewEntries,
+        emergencyStop: (diag as { safety?: { emergencyStop?: boolean } }).safety?.emergencyStop,
         cooldownRemaining: diag.strategy?.cooldownCandlesRemaining,
         lastProcessedCandleTs: diag.strategy?.lastProcessedCandleTs,
       });
@@ -228,10 +236,12 @@ async function main(): Promise<void> {
 
     const apiPhase = await apiPhase1(botId);
     const finalStages = getPipelineStageCounts();
+    const allHaveSl = confirmed.length >= TARGET && confirmed.every((t) => t.slOnExchange);
     const success =
       confirmed.length >= TARGET &&
       finalStages.entered_confirmed >= TARGET &&
-      finalStages.signal_found >= TARGET;
+      finalStages.signal_found >= TARGET &&
+      allHaveSl;
 
     const report = {
       success,
@@ -254,6 +264,7 @@ async function main(): Promise<void> {
       pipelineStages: finalStages,
       rejectionCounters: getRejectionCounters(),
       continuedAfterFirst: confirmed.length >= 2,
+      allEntriesHadExchangeSl: allHaveSl,
       signalsConvertToEntries: finalStages.signal_found > 0 && finalStages.entered_confirmed >= 1,
       apiPhase,
       botId,

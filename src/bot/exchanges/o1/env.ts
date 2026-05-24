@@ -96,6 +96,8 @@ export const readO1Env = (): O1EnvConfig => {
     debugWs: asBool(process.env.O1_DEBUG_WS, false),
     candlePollIntervalMs: asNum(process.env.O1_CANDLE_POLL_MS, 20_000),
     manageExistingPositionOnly: asBool(process.env.O1_MANAGE_EXISTING_POSITION_ONLY, false),
+    scheduledRestartIntervalHours: asNum(process.env.O1_SCHEDULED_RESTART_HOURS, 12),
+    scheduledRestartCooldownMs: asNum(process.env.O1_SCHEDULED_RESTART_COOLDOWN_MS, 120_000),
   };
 };
 
